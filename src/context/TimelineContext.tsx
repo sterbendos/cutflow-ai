@@ -9,6 +9,7 @@ import React, {
   useEffect,
   useReducer,
   useRef,
+  useState,
 } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
@@ -36,6 +37,8 @@ export interface TimelineState {
 // ─────────────────────────────────────────────────────────────
 // Reducer Actions
 // ─────────────────────────────────────────────────────────────
+
+type Sensitivity = 'minimal' | 'balanced' | 'action' | 'aggressive';
 
 type TimelineAction =
   | { type: 'REPLACE_STATE'; payload: TimelineState }
@@ -99,6 +102,8 @@ function timelineReducer(
 // Context Shape
 // ─────────────────────────────────────────────────────────────
 
+import { useWhisper, TranscriptWord } from '../hooks/useWhisper';
+
 interface TimelineContextValue {
   state: TimelineState;
   dispatch: React.Dispatch<TimelineAction>;
@@ -107,6 +112,10 @@ interface TimelineContextValue {
   toggleSilenceSkip: () => Promise<void>;
   deleteRange: (start: number, end: number) => Promise<void>;
   markSegment: (id: string, segmentType: SegmentType) => Promise<void>;
+  analyzeVideo: (sensitivity: Sensitivity) => Promise<void>;
+  isAnalyzing: boolean;
+  transcript: TranscriptWord[];
+  isTranscribing: boolean;
 }
 
 const TimelineContext = createContext<TimelineContextValue | null>(null);
@@ -117,6 +126,8 @@ const TimelineContext = createContext<TimelineContextValue | null>(null);
 
 export function TimelineProvider({ children }: { children: React.ReactNode }) {
   const [state, dispatch] = useReducer(timelineReducer, initialState);
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const { transcript, isTranscribing, transcribeVideo } = useWhisper();
   const stateRef = useRef(state);
   stateRef.current = state;
 
@@ -164,7 +175,9 @@ export function TimelineProvider({ children }: { children: React.ReactNode }) {
         payload: { path, duration },
       });
     }
-  }, []);
+    // Kick off background transcription
+    transcribeVideo(path);
+  }, [transcribeVideo]);
 
   // ── toggleSilenceSkip: calls Rust command ──
   const toggleSilenceSkip = useCallback(async () => {
@@ -220,6 +233,25 @@ export function TimelineProvider({ children }: { children: React.ReactNode }) {
     []
   );
 
+  // ── analyzeVideo: runs auto-editor via Rust backend ──
+  const analyzeVideo = useCallback(
+    async (sensitivity: Sensitivity) => {
+      if (!stateRef.current.source_video_path) return;
+      setIsAnalyzing(true);
+      try {
+        const newState = await invoke<TimelineState>('analyze_video', {
+          sensitivity,
+        });
+        dispatch({ type: 'REPLACE_STATE', payload: newState });
+      } catch (err) {
+        console.error('Auto-editor analysis failed:', err);
+      } finally {
+        setIsAnalyzing(false);
+      }
+    },
+    []
+  );
+
   return (
     <TimelineContext.Provider
       value={{
@@ -230,6 +262,10 @@ export function TimelineProvider({ children }: { children: React.ReactNode }) {
         toggleSilenceSkip,
         deleteRange,
         markSegment,
+        analyzeVideo,
+        isAnalyzing,
+        transcript,
+        isTranscribing,
       }}
     >
       {children}

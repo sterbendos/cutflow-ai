@@ -8,13 +8,15 @@ pub mod server;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use std::process::Command;
 use std::sync::{Arc, RwLock};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager, Emitter};
+use tauri_plugin_shell::ShellExt;
 
 // ─────────────────────────────────────────────────────────────
 // Data Contracts (mirrors TypeScript interfaces on the frontend)
 // ─────────────────────────────────────────────────────────────
+
+// (AutoEditor Structs Removed)
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct EdlSegment {
@@ -214,37 +216,62 @@ fn generate_ffmpeg_command(output_path: String) -> Result<String, String> {
         .collect();
     let select_expr = between_clauses.join("+");
 
-    // Full filtergraph: select → setpts → ASS subtitle burn-in
+    // Full filtergraph: select → setpts
     let filtergraph = format!(
-        "[0:v]select='{select_expr}',setpts=N/25/TB[v_cut];\
-         [0:a]aselect='{select_expr}',asetpts=N/SR/TB[a_cut];\
-         [v_cut]ass=captions.ass[final_v]"
+        "[0:v]select='{select_expr}',setpts=N/FRAME_RATE/TB[v_cut];\
+         [0:a]aselect='{select_expr}',asetpts=N/SR/TB[a_cut]"
     );
 
     let normalized_input = normalize_windows_path(&state.source_video_path);
     let normalized_output = normalize_windows_path(&output_path);
 
-    let cmd = format!(
-        r#"ffmpeg.exe -i "{normalized_input}" -filter_complex "{filtergraph}" -map "[final_v]" -map "[a_cut]" -c:v libx264 -preset fast -crf 18 -c:a aac -b:a 192k -movflags +faststart "{normalized_output}""#
-    );
+    // Provide the arguments to the sidecar, not the full command string
+    // because `tauri_plugin_shell::Command::new_sidecar` takes args iteratively
+    // We will serialize them as JSON string to easily parse back in execute_export
+    let args = serde_json::json!([
+        "-y",
+        "-i",
+        normalized_input,
+        "-filter_complex",
+        filtergraph,
+        "-map",
+        "[v_cut]",
+        "-map",
+        "[a_cut]",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "fast",
+        "-crf",
+        "18",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "192k",
+        "-movflags",
+        "+faststart",
+        normalized_output
+    ]);
 
-    Ok(cmd)
+    Ok(serde_json::to_string(&args).unwrap())
 }
 
 // ─────────────────────────────────────────────────────────────
 // Tauri Command: execute_export
-// Runs the generated ffmpeg.exe command as a Windows subprocess.
+// Runs the generated ffmpeg.exe command as a Tauri sidecar subprocess.
 // ─────────────────────────────────────────────────────────────
 
 #[tauri::command]
-fn execute_export(app: AppHandle, output_path: String) -> Result<String, String> {
-    let cmd_str = generate_ffmpeg_command(output_path)?;
+async fn execute_export(app: AppHandle, output_path: String) -> Result<String, String> {
+    let args_json = generate_ffmpeg_command(output_path)?;
+    let args: Vec<String> = serde_json::from_str(&args_json).unwrap();
 
-    // Spawn ffmpeg.exe via cmd.exe on Windows so PATH resolution works correctly
-    let output = Command::new("cmd")
-        .args(["/C", &cmd_str])
+    let output = app.shell().sidecar("ffmpeg")
+        .map_err(|e| format!("Failed to create sidecar command: {e}"))?
+        .args(args)
         .output()
-        .map_err(|e| format!("Failed to spawn ffmpeg: {e}"))?;
+        .await
+        .map_err(|e| format!("Failed to spawn ffmpeg sidecar: {e}"))?;
 
     if output.status.success() {
         let msg = "Export completed successfully.".to_string();
@@ -255,6 +282,172 @@ fn execute_export(app: AppHandle, output_path: String) -> Result<String, String>
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         Err(format!("ffmpeg failed:\n{stderr}"))
     }
+}
+
+// ─────────────────────────────────────────────────────────────
+// Tauri Command: analyze_video
+// Runs FFmpeg silencedetect and updates the timeline state natively.
+// ─────────────────────────────────────────────────────────────
+
+#[tauri::command]
+async fn analyze_video(app: AppHandle, sensitivity: String) -> Result<TimelineState, String> {
+    let (source_video_path, duration) = {
+        let state_read = TIMELINE_STATE
+            .read()
+            .map_err(|e| format!("Lock poisoned: {e}"))?;
+        
+        let path = state_read.source_video_path.clone();
+        let dur = state_read.edl.iter().map(|s| s.end).fold(0.0, f64::max);
+        (path, dur)
+    };
+
+    if source_video_path.is_empty() {
+        return Err("No source video loaded".to_string());
+    }
+
+    let min_duration = match sensitivity.as_str() {
+        "minimal" => "1.0",
+        "balanced" => "0.4",
+        "action" => "0.25",
+        "aggressive" => "0.15",
+        _ => "0.4",
+    };
+
+    let normalized_input = normalize_windows_path(&source_video_path);
+    let filter = format!("silencedetect=noise=-30dB:d={}", min_duration);
+
+    let output = app.shell().sidecar("ffmpeg")
+        .map_err(|e| format!("Failed to create sidecar command: {e}"))?
+        .args(["-i", &normalized_input, "-af", &filter, "-f", "null", "-"])
+        .output()
+        .await
+        .map_err(|e| format!("Failed to run ffmpeg silencedetect: {e}"))?;
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    
+    // Parse silence_start and silence_end from stderr
+    // Lines look like: 
+    // [silencedetect @ 00000] silence_start: 12.34
+    // [silencedetect @ 00000] silence_end: 14.56 | silence_duration: 2.22
+
+    let mut silence_ranges: Vec<(f64, f64)> = Vec::new();
+    let mut current_start = None;
+
+    for line in stderr.lines() {
+        if line.contains("silence_start:") {
+            if let Some(pos) = line.find("silence_start: ") {
+                let val_str = &line[pos + 15..];
+                if let Ok(val) = val_str.trim().parse::<f64>() {
+                    current_start = Some(val);
+                }
+            }
+        } else if line.contains("silence_end:") {
+            if let Some(pos) = line.find("silence_end: ") {
+                let rest = &line[pos + 13..];
+                let val_str = rest.split('|').next().unwrap_or("").trim();
+                if let Ok(end_val) = val_str.parse::<f64>() {
+                    if let Some(start_val) = current_start.take() {
+                        silence_ranges.push((start_val, end_val));
+                    }
+                }
+            }
+        }
+    }
+
+    let mut edl = Vec::new();
+    let mut current_time = 0.0;
+
+    for (silence_start, silence_end) in silence_ranges {
+        // If there's a gap before the silence, that's a keep segment
+        if silence_start > current_time {
+            edl.push(EdlSegment {
+                id: uuid::Uuid::new_v4().to_string(),
+                start: current_time,
+                end: silence_start,
+                segment_type: "keep".to_string(),
+            });
+        }
+        
+        // Add the silence segment
+        edl.push(EdlSegment {
+            id: uuid::Uuid::new_v4().to_string(),
+            start: silence_start,
+            end: silence_end,
+            segment_type: "silence".to_string(),
+        });
+
+        current_time = silence_end;
+    }
+
+    // Add trailing keep segment if needed
+    if current_time < duration {
+         edl.push(EdlSegment {
+             id: uuid::Uuid::new_v4().to_string(),
+             start: current_time,
+             end: duration,
+             segment_type: "keep".to_string(),
+         });
+    }
+
+    if edl.is_empty() {
+        edl = vec![EdlSegment {
+             id: uuid::Uuid::new_v4().to_string(),
+             start: 0.0,
+             end: duration,
+             segment_type: "keep".to_string(),
+         }];
+    }
+
+    let mut state_write = TIMELINE_STATE
+        .write()
+        .map_err(|e| format!("Lock poisoned: {e}"))?;
+        
+    state_write.edl = edl;
+    let snapshot = state_write.clone();
+    drop(state_write);
+
+    app.emit("timeline-external-update", &snapshot)
+        .map_err(|e| format!("Emit failed: {e}"))?;
+
+    Ok(snapshot)
+}
+
+// ─────────────────────────────────────────────────────────────
+// Tauri Command: extract_audio_for_transcription
+// Uses FFmpeg to extract a 16kHz mono WAV file for Whisper AI
+// ─────────────────────────────────────────────────────────────
+
+#[tauri::command]
+async fn extract_audio_for_transcription(app: AppHandle, video_path: String) -> Result<String, String> {
+    let normalized_input = normalize_windows_path(&video_path);
+    let output_path = std::env::temp_dir().join(format!("cutflow_audio_{}.wav", uuid::Uuid::new_v4()));
+    let output_str = output_path.to_string_lossy().to_string();
+
+    let output = app.shell().sidecar("ffmpeg")
+        .map_err(|e| format!("Failed to create sidecar command: {e}"))?
+        .args([
+            "-y",
+            "-i",
+            &normalized_input,
+            "-vn",
+            "-acodec",
+            "pcm_s16le",
+            "-ar",
+            "16000",
+            "-ac",
+            "1",
+            &output_str,
+        ])
+        .output()
+        .await
+        .map_err(|e| format!("Failed to run ffmpeg audio extraction: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("FFmpeg failed to extract audio: {stderr}"));
+    }
+
+    Ok(output_str)
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -277,6 +470,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_shell::init())
         .invoke_handler(tauri::generate_handler![
             get_timeline_state,
             set_source_video,
@@ -284,6 +478,8 @@ pub fn run() {
             toggle_silence_skip,
             generate_ffmpeg_command,
             execute_export,
+            analyze_video,
+            extract_audio_for_transcription,
         ])
         .run(tauri::generate_context!())
         .expect("error while running CutFlow AI");

@@ -11,8 +11,8 @@
     "core:window:allow-start-dragging",
     "dialog:allow-open",
     "dialog:allow-save",
-    "fs:allow-read-files",
-    "fs:allow-write-files",
+    "fs:read-all",
+    "fs:write-all",
     "fs:allow-read-dir",
     "fs:allow-exists"
   ]

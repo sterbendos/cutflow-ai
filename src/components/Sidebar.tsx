@@ -3,6 +3,7 @@
 
 import React, { useCallback, useRef, useState } from 'react';
 import { open } from '@tauri-apps/plugin-dialog';
+import { convertFileSrc } from '@tauri-apps/api/core';
 import { useTimeline } from '@/context/TimelineContext';
 
 // ─── Types ────────────────────────────────────────────────────
@@ -65,7 +66,7 @@ function PlusIcon() {
 // ─────────────────────────────────────────────────────────────
 
 export default function Sidebar() {
-  const { state, loadVideo } = useTimeline();
+  const { state, loadVideo, analyzeVideo, isAnalyzing } = useTimeline();
   const [assets, setAssets] = useState<AssetItem[]>([]);
   const [activeAssetId, setActiveAssetId] = useState<string | null>(null);
   const [sensitivity, setSensitivity] = useState<Sensitivity>('balanced');
@@ -78,7 +79,7 @@ export default function Sidebar() {
       const v = document.createElement('video');
       v.preload = 'metadata';
       // Tauri asset protocol for local files
-      v.src = `asset://${filePath.replace(/\\/g, '/')}`;
+      v.src = convertFileSrc(filePath);
       v.onloadedmetadata = () => resolve(isFinite(v.duration) ? v.duration : 60);
       v.onerror = () => resolve(60); // fallback: 60s
     });
@@ -112,9 +113,11 @@ export default function Sidebar() {
       if (first) {
         setActiveAssetId(first.id);
         await loadVideo(first.path, first.duration);
+        // Auto-analyze with current sensitivity
+        await analyzeVideo(sensitivity);
       }
     },
-    [loadVideo]
+    [loadVideo, analyzeVideo, sensitivity]
   );
 
   // ── File picker dialog ─────────────────────────────────────
@@ -239,14 +242,30 @@ export default function Sidebar() {
                 key={key}
                 id={`sensitivity-${key}`}
                 className={`sensitivity-btn${sensitivity === key ? ' active' : ''}`}
-                onClick={() => setSensitivity(key)}
+                onClick={async () => {
+                  setSensitivity(key);
+                  if (state.source_video_path) {
+                    await analyzeVideo(key);
+                  }
+                }}
                 title={desc}
                 aria-pressed={sensitivity === key}
+                disabled={isAnalyzing}
               >
                 {label}
               </button>
             ))}
           </div>
+          {isAnalyzing && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 }}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--teal-primary)" strokeWidth="2.5" strokeLinecap="round">
+                <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83">
+                  <animateTransform attributeName="transform" type="rotate" from="0 12 12" to="360 12 12" dur="1s" repeatCount="indefinite"/>
+                </path>
+              </svg>
+              <span style={{ fontSize: 11, color: 'var(--teal-primary)', fontWeight: 500 }}>Analyzing audio…</span>
+            </div>
+          )}
           <p style={{ fontSize: 11, color: 'var(--text-subtle)', marginTop: 6, lineHeight: 1.4 }}>
             {SENSITIVITY_OPTIONS.find(o => o.key === sensitivity)?.desc}
           </p>

@@ -5,6 +5,7 @@
 import { useCallback, useEffect, useRef } from 'react';
 import { useTimeline } from '@/context/TimelineContext';
 import { usePlaybackPipeline } from '@/hooks/usePlaybackPipeline';
+import { convertFileSrc } from '@tauri-apps/api/core';
 
 // ─── Icon helpers ─────────────────────────────────────────────
 
@@ -106,9 +107,8 @@ export default function VideoPlayer() {
     }
 
     // Use Tauri's asset protocol to load a local file
-    const normalizedPath = state.source_video_path.replace(/\\/g, '/');
-    // Tauri v2 asset protocol: https://asset.localhost/<path>
-    video.src = `https://asset.localhost/${normalizedPath}`;
+    // Tauri v2 asset protocol resolution
+    video.src = convertFileSrc(state.source_video_path);
     video.load();
     video.currentTime = 0;
   }, [state.source_video_path]);
