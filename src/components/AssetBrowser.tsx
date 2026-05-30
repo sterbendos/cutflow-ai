@@ -4,6 +4,7 @@
 import { useState, useRef, useCallback, useMemo, useEffect } from 'react';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { useTimeline } from '@/context/TimelineContext';
+import { motion, AnimatePresence } from 'framer-motion';
 
 // ─── Types ────────────────────────────────────────────────────
 
@@ -83,6 +84,26 @@ function probeDuration(filePath: string): Promise<number> {
   });
 }
 
+// ─── Animation Variants ────────────────────────────────────────
+
+const containerVariants = {
+  hidden: { opacity: 0 },
+  visible: {
+    opacity: 1,
+    transition: { staggerChildren: 0.05 }
+  }
+};
+
+const itemVariants = {
+  hidden: { opacity: 0, scale: 0.95, y: 10 },
+  visible: { 
+    opacity: 1, 
+    scale: 1, 
+    y: 0,
+    transition: { type: 'spring', damping: 20, stiffness: 150 }
+  }
+};
+
 // ─── Main Component ──────────────────────────────────────────
 
 export default function AssetBrowser() {
@@ -159,10 +180,27 @@ export default function AssetBrowser() {
     await loadVideo(asset.path, asset.duration);
   }, [loadVideo]);
 
-  // ── File dialog (non-Tauri fallback) ──
-  const openFilePicker = useCallback(() => {
-    fileInputRef.current?.click();
-  }, []);
+  // ── File dialog (Tauri with fallback) ──
+  const openFilePicker = useCallback(async () => {
+    try {
+      const { open } = await import('@tauri-apps/plugin-dialog');
+      const selected = await open({
+        multiple: true,
+        filters: [{ name: 'Media', extensions: ['mp4', 'mov', 'webm', 'mkv', 'mp3', 'wav', 'png', 'jpg'] }],
+      });
+      if (selected) {
+        const paths = Array.isArray(selected) ? selected : [selected];
+        await addFiles(paths.map(p => typeof p === 'string' ? p : (p as any).path));
+      }
+    } catch {
+      fileInputRef.current?.click();
+    }
+  }, [addFiles]);
+
+  useEffect(() => {
+    window.addEventListener('open-add-media', openFilePicker);
+    return () => window.removeEventListener('open-add-media', openFilePicker);
+  }, [openFilePicker]);
 
   const handleFileInput = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
@@ -301,10 +339,18 @@ export default function AssetBrowser() {
 
         {/* Grid view */}
         {viewMode === 'grid' && assets.length > 0 && (
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+          <motion.div 
+            variants={containerVariants}
+            initial="hidden"
+            animate="visible"
+            style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}
+          >
             {assets.map((asset) => (
-              <div
+              <motion.div
                 key={asset.id}
+                variants={itemVariants}
+                whileHover={{ scale: 1.02 }}
+                whileTap={{ scale: 0.98 }}
                 className={`asset-card${activeId === asset.id ? ' active' : ''}`}
                 onClick={() => selectAsset(asset)}
                 style={{
@@ -312,6 +358,7 @@ export default function AssetBrowser() {
                   border: activeId === asset.id ? '2px solid var(--teal-primary)' : '2px solid transparent',
                   borderRadius: 'var(--radius-sm)',
                   overflow: 'hidden',
+                  position: 'relative'
                 }}
               >
                 {/* Thumbnail area */}
@@ -385,17 +432,25 @@ export default function AssetBrowser() {
                 >
                   ✕
                 </button>
-              </div>
+              </motion.div>
             ))}
-          </div>
+          </motion.div>
         )}
 
         {/* List view */}
         {viewMode === 'list' && assets.length > 0 && (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+          <motion.div 
+            variants={containerVariants}
+            initial="hidden"
+            animate="visible"
+            style={{ display: 'flex', flexDirection: 'column', gap: 2 }}
+          >
             {assets.map((asset) => (
-              <div
+              <motion.div
                 key={asset.id}
+                variants={itemVariants}
+                whileHover={{ scale: 1.01, backgroundColor: 'rgba(255,255,255,0.03)' }}
+                whileTap={{ scale: 0.99 }}
                 onClick={() => selectAsset(asset)}
                 style={{
                   display: 'flex',
@@ -432,9 +487,9 @@ export default function AssetBrowser() {
                 >
                   ✕
                 </button>
-              </div>
+              </motion.div>
             ))}
-          </div>
+          </motion.div>
         )}
       </div>
 

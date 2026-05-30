@@ -4,6 +4,7 @@
 import { useState } from 'react';
 import { useTimeline } from '@/context/TimelineContext';
 import ExportDialog from './ExportDialog';
+import { motion } from 'framer-motion';
 
 // ─── SVG Icon helpers (inline, no external icon dep) ──────────
 
@@ -37,7 +38,7 @@ function RedoIcon() {
 // ─────────────────────────────────────────────────────────────
 
 export default function Header() {
-  const { state } = useTimeline();
+  const { state, undo, redo, canUndo, canRedo } = useTimeline();
   const [exportDialogOpen, setExportDialogOpen] = useState(false);
 
   const hasVideo = Boolean(state.source_video_path);
@@ -64,25 +65,31 @@ export default function Header() {
 
       {/* Actions */}
       <div className="header__actions">
-        <button
+        <motion.button
           id="btn-undo"
           className="btn-icon"
           title="Undo (Ctrl+Z)"
           aria-label="Undo"
-          disabled={!hasVideo}
+          disabled={!canUndo}
+          onClick={undo}
+          whileTap={canUndo ? { scale: 0.85 } : {}}
+          animate={{ opacity: canUndo ? 1 : 0.4 }}
         >
           <UndoIcon />
-        </button>
+        </motion.button>
 
-        <button
+        <motion.button
           id="btn-redo"
           className="btn-icon"
           title="Redo (Ctrl+Y)"
           aria-label="Redo"
-          disabled={!hasVideo}
+          disabled={!canRedo}
+          onClick={redo}
+          whileTap={canRedo ? { scale: 0.85 } : {}}
+          animate={{ opacity: canRedo ? 1 : 0.4 }}
         >
           <RedoIcon />
-        </button>
+        </motion.button>
 
         <div
           style={{
@@ -94,12 +101,14 @@ export default function Header() {
           aria-hidden="true"
         />
 
-        <button
+        <motion.button
           id="btn-export"
           className="btn-export"
           onClick={() => setExportDialogOpen(true)}
           disabled={!hasVideo}
           aria-label="Export video"
+          whileHover={hasVideo ? { scale: 1.02, boxShadow: "0 4px 16px rgba(14, 165, 233, 0.35)" } : {}}
+          whileTap={hasVideo ? { scale: 0.98 } : {}}
         >
           <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
@@ -109,7 +118,7 @@ export default function Header() {
             </svg>
             Export
           </span>
-        </button>
+        </motion.button>
       </div>
 
       <ExportDialog open={exportDialogOpen} onClose={() => setExportDialogOpen(false)} />

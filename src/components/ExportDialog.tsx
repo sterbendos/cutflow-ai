@@ -5,6 +5,7 @@ import { useState, useCallback } from 'react';
 import { useTimeline } from '@/context/TimelineContext';
 import { generateFcpxml, type ExportClip } from '@/lib/export/fcpxml';
 import { generateEdl } from '@/lib/export/edl';
+import { motion, AnimatePresence } from 'framer-motion';
 
 interface ExportDialogProps {
   open: boolean;
@@ -149,35 +150,42 @@ export default function ExportDialog({ open, onClose }: ExportDialogProps) {
     }
   }, [state.source_video_path, state.edl, state.transitionType, state.transitionDuration, format, quality, resolution, includeSubtitles, onClose]);
 
-  if (!open) return null;
-
   const hasVideo = Boolean(state.source_video_path);
 
   return (
-    <div
-      style={{
-        position: 'fixed',
-        inset: 0,
-        background: 'rgba(0,0,0,0.6)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        zIndex: 1000,
-      }}
-      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
-    >
-      <div
-        style={{
-          background: '#1a1a2e',
-          border: '1px solid var(--border)',
-          borderRadius: 'var(--radius)',
-          width: 420,
-          maxWidth: '90vw',
-          padding: 24,
-          boxShadow: '0 20px 60px rgba(0,0,0,0.5)',
-        }}
-      >
-        <h2 style={{ fontSize: 16, fontWeight: 700, margin: '0 0 4px', color: 'var(--text)' }}>Export</h2>
+    <AnimatePresence>
+      {open && (
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(0,0,0,0.6)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 1000,
+          }}
+          onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+        >
+          <motion.div
+            initial={{ scale: 0.95, opacity: 0 }}
+            animate={{ scale: 1, opacity: 1 }}
+            exit={{ scale: 0.95, opacity: 0 }}
+            transition={{ type: 'spring', damping: 25, stiffness: 300 }}
+            style={{
+              background: '#1a1a2e',
+              border: '1px solid var(--border)',
+              borderRadius: 'var(--radius)',
+              width: 420,
+              maxWidth: '90vw',
+              padding: 24,
+              boxShadow: 'var(--shadow-premium, 0 20px 60px rgba(0,0,0,0.5))',
+            }}
+          >
+            <h2 style={{ fontSize: 16, fontWeight: 700, margin: '0 0 4px', color: 'var(--text)' }}>Export</h2>
         <p style={{ fontSize: 11, color: 'var(--text-muted)', margin: '0 0 20px' }}>
           Choose export format and settings
         </p>
@@ -340,9 +348,11 @@ export default function ExportDialog({ open, onClose }: ExportDialogProps) {
           <p style={{ fontSize: 10, color: exportStatus === 'error' ? '#dc2626' : 'var(--text-muted)', marginTop: 8, textAlign: 'center' }}>
             {statusMessage}
           </p>
-        )}
-      </div>
-    </div>
+          )}
+        </motion.div>
+      </motion.div>
+      )}
+    </AnimatePresence>
   );
 }
 

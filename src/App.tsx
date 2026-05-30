@@ -14,14 +14,23 @@ import VideoPlayer from '@/components/VideoPlayer';
 import TranscriptView from '@/components/TranscriptView';
 import ChatPanel from '@/components/ChatPanel';
 import Timeline from '@/components/Timeline';
+import WelcomeScreen from '@/components/WelcomeScreen';
+import { useTimeline } from '@/context/TimelineContext';
+import { AnimatePresence } from 'framer-motion';
 
 type RightTab = 'transcript' | 'chat';
 
 export default function App() {
   const [rightTab, setRightTab] = useState<RightTab>('transcript');
+  const { state } = useTimeline();
+  const hasVideo = Boolean(state.source_video_path);
 
   return (
     <div className="app-shell">
+      <AnimatePresence>
+        {!hasVideo && <WelcomeScreen key="welcome" />}
+      </AnimatePresence>
+
       <Header />
 
       <div className="workspace">

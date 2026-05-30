@@ -166,6 +166,10 @@ interface TimelineContextValue {
   language: string;
   setLanguage: (lang: string) => void;
   retranscribe: () => void;
+  undo: () => void;
+  redo: () => void;
+  canUndo: boolean;
+  canRedo: boolean;
 }
 
 const TimelineContext = createContext<TimelineContextValue | null>(null);
@@ -178,8 +182,23 @@ export function TimelineProvider({ children }: { children: React.ReactNode }) {
   const [state, dispatch] = useReducer(timelineReducer, initialState);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const { transcript, isTranscribing, transcribeVideo, language, setLanguage } = useWhisper();
+  
+  // History Stack
+  const [past, setPast] = useState<TimelineState[]>([]);
+  const [future, setFuture] = useState<TimelineState[]>([]);
+
   const stateRef = useRef(state);
-  stateRef.current = state;
+  
+  // Push to history when we make significant changes
+  const saveHistory = useCallback((currentState: TimelineState) => {
+    setPast((p) => [...p, currentState]);
+    setFuture([]);
+  }, []);
+
+  // Update stateRef
+  useEffect(() => {
+    stateRef.current = state;
+  }, [state]);
 
   // ── Boot: hydrate from backend state on mount ──
   useEffect(() => {
@@ -268,6 +287,7 @@ export function TimelineProvider({ children }: { children: React.ReactNode }) {
       dispatch({ type: 'REPLACE_STATE', payload: newState });
     } catch {
       // Fallback: mark overlapping segments locally
+      saveHistory(stateRef.current);
       const updated = stateRef.current.edl.map((seg) => {
         const overlaps = seg.start < end && seg.end > start;
         return overlaps ? { ...seg, segment_type: 'user-deleted' as SegmentType } : seg;
@@ -289,6 +309,7 @@ export function TimelineProvider({ children }: { children: React.ReactNode }) {
         });
         dispatch({ type: 'REPLACE_STATE', payload: newState });
       } catch {
+        saveHistory(stateRef.current);
         dispatch({ type: 'MARK_SEGMENT', payload: { id, segmentType } });
       }
     },
@@ -337,6 +358,7 @@ export function TimelineProvider({ children }: { children: React.ReactNode }) {
           { id: crypto.randomUUID(), start: time, end: seg.end, segment_type: 'keep' },
         ];
         
+        saveHistory(stateRef.current);
         const newEdl = [...stateRef.current.edl];
         newEdl.splice(segIndex, 1, ...newSegments);
         dispatch({
@@ -369,6 +391,22 @@ export function TimelineProvider({ children }: { children: React.ReactNode }) {
     }
   }, [state.source_video_path, transcribeVideo, language]);
 
+  const undo = useCallback(() => {
+    if (past.length === 0) return;
+    const previous = past[past.length - 1];
+    setPast(past.slice(0, -1));
+    setFuture([stateRef.current, ...future]);
+    dispatch({ type: 'REPLACE_STATE', payload: previous });
+  }, [past, future]);
+
+  const redo = useCallback(() => {
+    if (future.length === 0) return;
+    const next = future[0];
+    setFuture(future.slice(1));
+    setPast([...past, stateRef.current]);
+    dispatch({ type: 'REPLACE_STATE', payload: next });
+  }, [past, future]);
+
   return (
     <TimelineContext.Provider
       value={{
@@ -391,6 +429,10 @@ export function TimelineProvider({ children }: { children: React.ReactNode }) {
         language,
         setLanguage,
         retranscribe,
+        undo,
+        redo,
+        canUndo: past.length > 0,
+        canRedo: future.length > 0,
       }}
     >
       {children}

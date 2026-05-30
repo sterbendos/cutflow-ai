@@ -10,6 +10,27 @@ import {
   getTemplatesByCategory,
   getAllCategories,
 } from '@/templates/motion-graphics';
+import { motion, AnimatePresence } from 'framer-motion';
+
+// ─── Animation Variants ────────────────────────────────────────
+
+const containerVariants = {
+  hidden: { opacity: 0 },
+  visible: {
+    opacity: 1,
+    transition: { staggerChildren: 0.05 }
+  }
+};
+
+const itemVariants = {
+  hidden: { opacity: 0, scale: 0.95, y: 10 },
+  visible: { 
+    opacity: 1, 
+    scale: 1, 
+    y: 0,
+    transition: { type: 'spring', damping: 20, stiffness: 150 }
+  }
+};
 
 // ─── Category Icons ──────────────────────────────────────────
 
@@ -161,7 +182,10 @@ export default function TemplateBrowser() {
       </div>
 
       {/* Template Grid */}
-      <div
+      <motion.div
+        variants={containerVariants}
+        initial="hidden"
+        animate="visible"
         style={{
           display: 'grid',
           gridTemplateColumns: '1fr 1fr',
@@ -172,8 +196,11 @@ export default function TemplateBrowser() {
         {filteredTemplates.map((tpl) => {
           const isSelected = selectedTemplate === tpl.id;
           return (
-            <button
+            <motion.button
               key={tpl.id}
+              variants={itemVariants}
+              whileHover={{ scale: 1.02 }}
+              whileTap={{ scale: 0.98 }}
               onClick={() => setSelectedTemplate(tpl.id)}
               style={{
                 padding: 0,
@@ -200,10 +227,10 @@ export default function TemplateBrowser() {
               >
                 {tpl.name}
               </div>
-            </button>
+            </motion.button>
           );
         })}
-      </div>
+      </motion.div>
 
       {/* Apply Form */}
       {currentTemplate && (
