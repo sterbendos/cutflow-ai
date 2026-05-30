@@ -9,7 +9,7 @@ use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::{Arc, RwLock};
-use tauri::{AppHandle, Manager, Emitter};
+use tauri::{AppHandle, Emitter};
 use tauri_plugin_shell::ShellExt;
 
 // ─────────────────────────────────────────────────────────────
@@ -17,6 +17,15 @@ use tauri_plugin_shell::ShellExt;
 // ─────────────────────────────────────────────────────────────
 
 // (AutoEditor Structs Removed)
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct AudioSegment {
+    pub id: String,
+    pub path: String,
+    pub start: f64,
+    pub duration: f64,
+    pub r#type: String, // "sfx" | "music" | "voice"
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct EdlSegment {
@@ -28,10 +37,15 @@ pub struct EdlSegment {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct TimelineState {
-    pub source_video_path: String, // Windows-native path, canonicalized
+    pub source_video_path: String,
     pub edl: Vec<EdlSegment>,
+    pub audioEdl: Vec<AudioSegment>,
+    pub transitionType: String,
+    pub transitionDuration: f64,
     pub current_time: f64,
     pub is_silence_skip_enabled: bool,
+    #[serde(default)]
+    pub transcript_json: Option<serde_json::Value>,
 }
 
 impl Default for TimelineState {
@@ -39,8 +53,12 @@ impl Default for TimelineState {
         TimelineState {
             source_video_path: String::new(),
             edl: Vec::new(),
+            audioEdl: Vec::new(),
+            transitionType: "none".to_string(),
+            transitionDuration: 0.3,
             current_time: 0.0,
             is_silence_skip_enabled: true,
+            transcript_json: None,
         }
     }
 }
@@ -159,6 +177,41 @@ fn update_segment(
 }
 
 // ─────────────────────────────────────────────────────────────
+// Tauri Command: split_segment
+// ─────────────────────────────────────────────────────────────
+
+#[tauri::command]
+fn split_segment(app: AppHandle, segment_id: String, split_time: f64) -> Result<TimelineState, String> {
+    let mut state = TIMELINE_STATE.write().map_err(|e| format!("Lock poisoned: {e}"))?;
+    
+    let mut new_edl = Vec::new();
+    for seg in &state.edl {
+        if seg.id == segment_id && split_time > seg.start && split_time < seg.end {
+            new_edl.push(EdlSegment {
+                id: uuid::Uuid::new_v4().to_string(),
+                start: seg.start,
+                end: split_time,
+                segment_type: seg.segment_type.clone(),
+            });
+            new_edl.push(EdlSegment {
+                id: uuid::Uuid::new_v4().to_string(),
+                start: split_time,
+                end: seg.end,
+                segment_type: seg.segment_type.clone(),
+            });
+        } else {
+            new_edl.push(seg.clone());
+        }
+    }
+    
+    state.edl = new_edl;
+    
+    let snapshot = state.clone();
+    app.emit("timeline-external-update", &snapshot).map_err(|e| format!("Emit failed: {e}"))?;
+    Ok(snapshot)
+}
+
+// ─────────────────────────────────────────────────────────────
 // Tauri Command: toggle_silence_skip
 // ─────────────────────────────────────────────────────────────
 
@@ -209,25 +262,45 @@ fn generate_ffmpeg_command(output_path: String) -> Result<String, String> {
         return Err("No segments marked as 'keep'".to_string());
     }
 
-    // Build the select= expression
-    let between_clauses: Vec<String> = keep_segments
-        .iter()
-        .map(|s| format!("between(t,{:.6},{:.6})", s.start, s.end))
-        .collect();
-    let select_expr = between_clauses.join("+");
+    // For a complex transition like crossfade/xfade, we would need a much more complex filtergraph.
+    // For now, we'll keep the simple select logic if no transitions, and fallback to concat for transitions.
+    // Since xfade requires distinct inputs, implementing it purely with select is hard.
+    // Given timeline constraints, we will keep the standard export unless a transition is requested.
+    // Note: implementing true xfade here would require splitting the input into multiple streams.
+    
+    // We will use trim/atrim and concat instead of select/aselect to fix VFR sync issues.
+    let mut filtergraph = String::new();
+    let mut concat_inputs = String::new();
+    
+    for (i, seg) in keep_segments.iter().enumerate() {
+        let v_out = format!("[v{}]", i);
+        let a_out = format!("[a{}]", i);
+        filtergraph.push_str(&format!(
+            "[0:v]trim=start={:.6}:end={:.6},setpts=PTS-STARTPTS{};\
+             [0:a]atrim=start={:.6}:end={:.6},asetpts=PTS-STARTPTS{};",
+            seg.start, seg.end, v_out,
+            seg.start, seg.end, a_out
+        ));
+        concat_inputs.push_str(&format!("{}{}", v_out, a_out));
+    }
+    
+    let n = keep_segments.len();
+    filtergraph.push_str(&format!("{}concat=n={}:v=1:a=1[v_cut][a_cut]", concat_inputs, n));
 
-    // Full filtergraph: select → setpts
-    let filtergraph = format!(
-        "[0:v]select='{select_expr}',setpts=N/FRAME_RATE/TB[v_cut];\
-         [0:a]aselect='{select_expr}',asetpts=N/SR/TB[a_cut]"
-    );
+    let srt_path = std::env::temp_dir().join("cutflow_export_subs.srt");
+    let mut v_final = "[v_cut]";
+
+    // Assumes subtitles are written to cutflow_export_subs.srt by JS before export
+    if std::fs::metadata(&srt_path).is_ok() {
+        let escaped_srt = srt_path.to_string_lossy().replace('\\', "\\\\").replace(':', "\\:");
+        filtergraph.push_str(&format!(";[v_cut]subtitles='{}'[v_sub]", escaped_srt));
+        v_final = "[v_sub]";
+    }
 
     let normalized_input = normalize_windows_path(&state.source_video_path);
     let normalized_output = normalize_windows_path(&output_path);
 
     // Provide the arguments to the sidecar, not the full command string
-    // because `tauri_plugin_shell::Command::new_sidecar` takes args iteratively
-    // We will serialize them as JSON string to easily parse back in execute_export
     let args = serde_json::json!([
         "-y",
         "-i",
@@ -235,7 +308,7 @@ fn generate_ffmpeg_command(output_path: String) -> Result<String, String> {
         "-filter_complex",
         filtergraph,
         "-map",
-        "[v_cut]",
+        v_final,
         "-map",
         "[a_cut]",
         "-c:v",
@@ -475,6 +548,7 @@ pub fn run() {
             get_timeline_state,
             set_source_video,
             update_segment,
+            split_segment,
             toggle_silence_skip,
             generate_ffmpeg_command,
             execute_export,

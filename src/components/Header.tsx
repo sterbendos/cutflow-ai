@@ -2,9 +2,8 @@
 // 48px top bar: brand left, project name center, actions right.
 
 import { useState } from 'react';
-import { invoke } from '@tauri-apps/api/core';
-import { save } from '@tauri-apps/plugin-dialog';
 import { useTimeline } from '@/context/TimelineContext';
+import ExportDialog from './ExportDialog';
 
 // ─── SVG Icon helpers (inline, no external icon dep) ──────────
 
@@ -35,65 +34,17 @@ function RedoIcon() {
   );
 }
 
-function ExportSpinner() {
-  return (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
-      <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83">
-        <animateTransform attributeName="transform" type="rotate" from="0 12 12" to="360 12 12" dur="1s" repeatCount="indefinite"/>
-      </path>
-    </svg>
-  );
-}
-
 // ─────────────────────────────────────────────────────────────
 
 export default function Header() {
   const { state } = useTimeline();
-  const [exporting, setExporting] = useState(false);
-  const [exportStatus, setExportStatus] = useState<'idle' | 'success' | 'error'>('idle');
+  const [exportDialogOpen, setExportDialogOpen] = useState(false);
 
   const hasVideo = Boolean(state.source_video_path);
 
-  // Derive a friendly project name from the file path
   const projectName = hasVideo
     ? state.source_video_path.split('/').pop()?.replace(/\.[^.]+$/, '') ?? 'Untitled'
     : 'Untitled Project';
-
-  async function handleExport() {
-    if (!hasVideo || exporting) return;
-
-    try {
-      // Open a Save dialog so the user picks an output path
-      const outputPath = await save({
-        title: 'Export Video',
-        defaultPath: `${projectName}_export.mp4`,
-        filters: [{ name: 'MP4 Video', extensions: ['mp4'] }],
-      });
-
-      if (!outputPath) return; // User cancelled
-
-      setExporting(true);
-      setExportStatus('idle');
-
-      await invoke('execute_export', { outputPath });
-
-      setExportStatus('success');
-      setTimeout(() => setExportStatus('idle'), 3000);
-    } catch (err) {
-      console.error('Export failed:', err);
-      setExportStatus('error');
-      setTimeout(() => setExportStatus('idle'), 4000);
-    } finally {
-      setExporting(false);
-    }
-  }
-
-  const exportLabel = () => {
-    if (exporting) return 'Exporting…';
-    if (exportStatus === 'success') return '✓ Exported!';
-    if (exportStatus === 'error') return '✗ Failed';
-    return 'Export MP4';
-  };
 
   return (
     <header className="header" role="banner">
@@ -146,24 +97,22 @@ export default function Header() {
         <button
           id="btn-export"
           className="btn-export"
-          onClick={handleExport}
-          disabled={!hasVideo || exporting}
-          aria-label="Export video as MP4"
-          style={{
-            background:
-              exportStatus === 'success'
-                ? '#059669'
-                : exportStatus === 'error'
-                ? '#dc2626'
-                : undefined,
-          }}
+          onClick={() => setExportDialogOpen(true)}
+          disabled={!hasVideo}
+          aria-label="Export video"
         >
           <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-            {exporting && <ExportSpinner />}
-            {exportLabel()}
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <polyline points="7 10 12 15 17 10"/>
+              <line x1="12" y1="15" x2="12" y2="3"/>
+            </svg>
+            Export
           </span>
         </button>
       </div>
+
+      <ExportDialog open={exportDialogOpen} onClose={() => setExportDialogOpen(false)} />
     </header>
   );
 }

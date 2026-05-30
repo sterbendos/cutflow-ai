@@ -2,10 +2,13 @@
 // Flex-1 black viewport with rAF-driven playback pipeline,
 // floating status capsule, and bottom playback controls.
 
-import { useCallback, useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTimeline } from '@/context/TimelineContext';
 import { usePlaybackPipeline } from '@/hooks/usePlaybackPipeline';
 import { convertFileSrc } from '@tauri-apps/api/core';
+import SubtitleOverlay from './SubtitleOverlay';
+import MotionGraphicsOverlay from './MotionGraphicsOverlay';
+import AspectRatioSelector from './AspectRatioSelector';
 
 // ─── Icon helpers ─────────────────────────────────────────────
 
@@ -64,6 +67,16 @@ function SkipIcon({ active }: { active: boolean }) {
   );
 }
 
+function SubtitleIcon({ active }: { active: boolean }) {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+      style={{ color: active ? 'var(--teal-primary)' : undefined }}>
+      <rect x="3" y="5" width="18" height="14" rx="2" ry="2"></rect>
+      <path d="M7 15h4M15 15h2M7 11h2M13 11h4"></path>
+    </svg>
+  );
+}
+
 // ─── Helpers ──────────────────────────────────────────────────
 
 function formatTime(secs: number): string {
@@ -80,6 +93,7 @@ export default function VideoPlayer() {
   const { state, setCurrentTime, toggleSilenceSkip } = useTimeline();
   const videoRef = useRef<HTMLVideoElement>(null);
   const videoUrlRef = useRef<string | null>(null);
+  const [subtitlesVisible, setSubtitlesVisible] = useState(true);
 
   const {
     currentTime,
@@ -203,35 +217,71 @@ export default function VideoPlayer() {
         </div>
       )}
 
-      {/* Video element */}
-      <video
-        ref={videoRef}
-        id="main-video"
-        playsInline
-        preload="metadata"
-        aria-label="Video preview"
-        style={{
-          display: state.source_video_path ? 'block' : 'none',
-          maxHeight: 'calc(100% - 80px)',
-          width: 'auto',
-          maxWidth: '100%',
-        }}
-        onClick={togglePlay}
-      />
-
-      {/* Status Capsule — top right */}
+      {/* Video element with aspect ratio wrapper */}
       <div
-        className="status-capsule"
-        id="status-capsule"
-        aria-live="polite"
-        aria-label={capsuleLabel()}
+        style={{
+          display: state.source_video_path ? 'flex' : 'none',
+          alignItems: 'center',
+          justifyContent: 'center',
+          flex: 1,
+          width: '100%',
+          maxHeight: 'calc(100% - 80px)',
+        }}
       >
-        <span
-          className={`status-capsule__dot${capsuleActive ? '' : ' inactive'}`}
-          aria-hidden="true"
+        <video
+          ref={videoRef}
+          id="main-video"
+          playsInline
+          preload="metadata"
+          aria-label="Video preview"
+          style={{
+            maxWidth: '100%',
+            maxHeight: '100%',
+            objectFit: 'contain',
+            aspectRatio: state.aspectRatio,
+          }}
+          onClick={togglePlay}
         />
-        {capsuleLabel()}
       </div>
+
+      {/* Subtitles Overlay */}
+      <SubtitleOverlay visible={subtitlesVisible} />
+      {/* Motion Graphics Overlay */}
+      <MotionGraphicsOverlay />
+
+      {/* Aspect Ratio + Status toolbar */}
+      {state.source_video_path && (
+        <div
+          style={{
+            position: 'absolute',
+            top: 8,
+            left: 8,
+            right: 8,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            pointerEvents: 'none',
+          }}
+        >
+          <div style={{ pointerEvents: 'auto' }}>
+            <AspectRatioSelector />
+          </div>
+          <div style={{ flex: 1 }} />
+          <div
+            className="status-capsule"
+            id="status-capsule"
+            aria-live="polite"
+            aria-label={capsuleLabel()}
+            style={{ pointerEvents: 'auto', position: 'static' }}
+          >
+            <span
+              className={`status-capsule__dot${capsuleActive ? '' : ' inactive'}`}
+              aria-hidden="true"
+            />
+            {capsuleLabel()}
+          </div>
+        </div>
+      )}
 
       {/* Progress bar */}
       {state.source_video_path && (
@@ -342,6 +392,22 @@ export default function VideoPlayer() {
             }}
           >
             <SkipIcon active={state.is_silence_skip_enabled} />
+          </button>
+          
+          {/* Subtitle toggle */}
+          <button
+            id="btn-subtitles"
+            className="playback-btn"
+            onClick={() => setSubtitlesVisible(!subtitlesVisible)}
+            title={`Subtitles: ${subtitlesVisible ? 'ON' : 'OFF'}`}
+            aria-label={`Toggle subtitles (currently ${subtitlesVisible ? 'on' : 'off'})`}
+            style={{
+              color: subtitlesVisible
+                ? 'var(--teal-primary)'
+                : 'var(--text-muted)',
+            }}
+          >
+            <SubtitleIcon active={subtitlesVisible} />
           </button>
         </div>
       )}

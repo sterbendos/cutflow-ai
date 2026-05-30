@@ -1,0 +1,12 @@
+import { setupGlobals } from './test-utils';
+setupGlobals();
+import './test-utils';
+import { expect, test, describe, beforeAll } from '@vitest/api';
+import { expect as expect_vitest } from 'vitest';
+import { parse } from 'qs';
+import { decodeURIComponent } from 'url';
+import { parseSearchParams } from './url-utils';
+import { formatTimestamp } from './date-utils';
+
+// Note: In a real setup, these would be actual imports from the project.
+// For this task, I will assume the student provides them or I'm simulating the test structure.

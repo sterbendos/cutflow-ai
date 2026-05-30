@@ -36,10 +36,11 @@ function getSegmentTitle(seg: EdlSegment): string {
 // ─────────────────────────────────────────────────────────────
 
 export default function Timeline() {
-  const { state, markSegment } = useTimeline();
+  const { state, markSegment, splitSegment, removeAudioSegment } = useTimeline();
   const railRef = useRef<HTMLDivElement>(null);
   const [isDraggingPlayhead, setIsDraggingPlayhead] = useState(false);
   const [localTime, setLocalTime] = useState(0);
+  const [zoomLevel, setZoomLevel] = useState(1);
 
   // ── Total duration derived from EDL ──────────────────────
   const duration = useMemo(() => {
@@ -126,6 +127,12 @@ export default function Timeline() {
     seg: EdlSegment
   ) {
     e.stopPropagation();
+    if (e.shiftKey) {
+       // Razor tool: split at exact click position
+       const t = xToTime(e.clientX);
+       await splitSegment(t);
+       return;
+    }
     const nextType: EdlSegment['segment_type'] =
       seg.segment_type === 'keep'
         ? 'user-deleted'
@@ -173,6 +180,20 @@ export default function Timeline() {
           Timeline
         </span>
 
+        {/* Zoom Control */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>Zoom</span>
+          <input
+            type="range"
+            min="1"
+            max="20"
+            step="0.5"
+            value={zoomLevel}
+            onChange={(e) => setZoomLevel(parseFloat(e.target.value))}
+            style={{ width: 70, cursor: 'pointer' }}
+          />
+        </div>
+
         {/* Legend */}
         <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
           <LegendItem color="#2d5a8e" label={`Keep (${counts.keep})`} />
@@ -194,119 +215,175 @@ export default function Timeline() {
         </span>
       </div>
 
-      {/* Ruler */}
-      <div className="timeline-ruler" style={{ marginBottom: 4 }}>
-        {rulerTicks.map(({ t, pct }) => (
-          <React.Fragment key={t}>
-            <div
-              className="timeline-ruler__tick"
-              style={{ left: `${pct}%` }}
-              aria-hidden="true"
-            />
-            <div
-              className="timeline-ruler__label"
-              style={{ left: `${pct}%` }}
-              aria-hidden="true"
-            >
-              {formatRulerTime(t)}
-            </div>
-          </React.Fragment>
-        ))}
-      </div>
-
-      {/* Tracks */}
-      <div className="timeline-tracks">
-        {/* Video track */}
-        <div className="timeline-track">
-          <span className="timeline-track__label" aria-label="Video track">
-            VIDEO
-          </span>
-          <div
-            ref={railRef}
-            id="timeline-video-rail"
-            className="timeline-track__rail"
-            role="slider"
-            aria-label="Video timeline"
-            aria-valuemin={0}
-            aria-valuemax={Math.round(duration)}
-            aria-valuenow={Math.round(displayTime)}
-            onMouseDown={handleRailMouseDown}
-            style={{ cursor: 'crosshair', userSelect: 'none' }}
-          >
-            {/* Segment blocks */}
-            {state.edl.map((seg) => {
-              const leftPct = timeToPct(seg.start);
-              const widthPct = timeToPct(seg.end) - leftPct;
-              const widthPx = (widthPct / 100) * (railRef.current?.offsetWidth ?? 800);
-              if (widthPx < MIN_SEGMENT_WIDTH_PX) return null;
-
-              return (
+      <div style={{ overflowX: 'auto', overflowY: 'hidden', paddingBottom: 4, flex: 1, display: 'flex', flexDirection: 'column' }}>
+        <div style={{ width: `${zoomLevel * 100}%`, minWidth: '100%', position: 'relative', flex: 1, display: 'flex', flexDirection: 'column' }}>
+          {/* Ruler */}
+          <div className="timeline-ruler" style={{ marginBottom: 4 }}>
+            {rulerTicks.map(({ t, pct }) => (
+              <React.Fragment key={t}>
                 <div
-                  key={seg.id}
-                  id={`seg-${seg.id}`}
-                  className={getSegmentClass(seg.segment_type)}
-                  style={{
-                    left: `${leftPct}%`,
-                    width: `${widthPct}%`,
-                  }}
-                  title={getSegmentTitle(seg)}
-                  role="button"
-                  tabIndex={0}
-                  aria-label={getSegmentTitle(seg)}
-                  onClick={(e) => handleSegmentClick(e, seg)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' || e.key === ' ') {
-                      handleSegmentClick(e as unknown as React.MouseEvent, seg);
-                    }
-                  }}
-                />
-              );
-            })}
-
-            {/* Playhead */}
-            <div
-              className="timeline-playhead"
-              id="timeline-playhead"
-              style={{ left: `${timeToPct(displayTime)}%` }}
-              aria-hidden="true"
-            />
-          </div>
-        </div>
-
-        {/* Audio track (mirrors video EDL for now) */}
-        <div className="timeline-track">
-          <span className="timeline-track__label" aria-label="Audio track">
-            AUDIO
-          </span>
-          <div
-            id="timeline-audio-rail"
-            className="timeline-track__rail"
-            style={{ cursor: 'default' }}
-            aria-label="Audio timeline (mirrors video)"
-          >
-            {state.edl.map((seg) => {
-              const leftPct = timeToPct(seg.start);
-              const widthPct = timeToPct(seg.end) - leftPct;
-              return (
-                <div
-                  key={seg.id}
-                  className={getSegmentClass(seg.segment_type)}
-                  style={{
-                    left: `${leftPct}%`,
-                    width: `${widthPct}%`,
-                    opacity: 0.6,
-                    height: '60%',
-                    top: '20%',
-                  }}
+                  className="timeline-ruler__tick"
+                  style={{ left: `${pct}%` }}
                   aria-hidden="true"
                 />
-              );
-            })}
-            <div
-              className="timeline-playhead"
-              style={{ left: `${timeToPct(displayTime)}%`, opacity: 0.5 }}
-              aria-hidden="true"
-            />
+                <div
+                  className="timeline-ruler__label"
+                  style={{ left: `${pct}%` }}
+                  aria-hidden="true"
+                >
+                  {formatRulerTime(t)}
+                </div>
+              </React.Fragment>
+            ))}
+          </div>
+
+          {/* Tracks */}
+          <div className="timeline-tracks">
+            {/* Video track */}
+            <div className="timeline-track">
+              <span className="timeline-track__label" aria-label="Video track" style={{ position: 'sticky', left: 0, zIndex: 10 }}>
+                VIDEO
+              </span>
+              <div
+                ref={railRef}
+                id="timeline-video-rail"
+                className="timeline-track__rail"
+                role="slider"
+                aria-label="Video timeline"
+                aria-valuemin={0}
+                aria-valuemax={Math.round(duration)}
+                aria-valuenow={Math.round(displayTime)}
+                onMouseDown={handleRailMouseDown}
+                style={{ cursor: 'crosshair', userSelect: 'none' }}
+              >
+                {/* Segment blocks */}
+                {state.edl.map((seg) => {
+                  const leftPct = timeToPct(seg.start);
+                  const widthPct = timeToPct(seg.end) - leftPct;
+                  const widthPx = (widthPct / 100) * (railRef.current?.offsetWidth ?? 800);
+                  if (widthPx < MIN_SEGMENT_WIDTH_PX) return null;
+
+                  return (
+                    <div
+                      key={seg.id}
+                      id={`seg-${seg.id}`}
+                      className={getSegmentClass(seg.segment_type)}
+                      style={{
+                        left: `${leftPct}%`,
+                        width: `${widthPct}%`,
+                      }}
+                      title={getSegmentTitle(seg)}
+                      role="button"
+                      tabIndex={0}
+                      aria-label={getSegmentTitle(seg)}
+                      onClick={(e) => handleSegmentClick(e, seg)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          handleSegmentClick(e as unknown as React.MouseEvent, seg);
+                        }
+                      }}
+                    />
+                  );
+                })}
+
+                {/* Playhead */}
+                <div
+                  className="timeline-playhead"
+                  id="timeline-playhead"
+                  style={{ left: `${timeToPct(displayTime)}%` }}
+                  aria-hidden="true"
+                />
+              </div>
+            </div>
+
+            {/* Audio track (mirrors video EDL for now) */}
+            <div className="timeline-track">
+              <span className="timeline-track__label" aria-label="Audio track" style={{ position: 'sticky', left: 0, zIndex: 10 }}>
+                AUDIO
+              </span>
+              <div
+                id="timeline-audio-rail"
+                className="timeline-track__rail"
+                style={{ cursor: 'default' }}
+                aria-label="Audio timeline (mirrors video)"
+              >
+                {state.edl.map((seg) => {
+                  const leftPct = timeToPct(seg.start);
+                  const widthPct = timeToPct(seg.end) - leftPct;
+                  return (
+                    <div
+                      key={seg.id}
+                      className={getSegmentClass(seg.segment_type)}
+                      style={{
+                        left: `${leftPct}%`,
+                        width: `${widthPct}%`,
+                        opacity: 0.6,
+                        height: '60%',
+                        top: '20%',
+                      }}
+                      aria-hidden="true"
+                    />
+                  );
+                })}
+                <div
+                  className="timeline-playhead"
+                  style={{ left: `${timeToPct(displayTime)}%`, opacity: 0.5 }}
+                  aria-hidden="true"
+                />
+              </div>
+            </div>
+
+            {/* Extra Audio (Music/SFX) track */}
+            <div className="timeline-track">
+              <span className="timeline-track__label" aria-label="Audio FX track" style={{ position: 'sticky', left: 0, zIndex: 10 }}>
+                FX
+              </span>
+              <div
+                id="timeline-audio-fx-rail"
+                className="timeline-track__rail"
+                style={{ cursor: 'default' }}
+                aria-label="Audio FX timeline"
+              >
+                {state.audioEdl.map((seg) => {
+                  const leftPct = timeToPct(seg.start);
+                  const widthPct = timeToPct(seg.start + seg.duration) - leftPct;
+                  const color = seg.type === 'music' ? '#8b5cf6' : seg.type === 'voice' ? '#ec4899' : '#14b8a6';
+                  return (
+                    <div
+                      key={seg.id}
+                      style={{
+                        position: 'absolute',
+                        left: `${leftPct}%`,
+                        width: `${widthPct}%`,
+                        background: color,
+                        border: '1px solid rgba(0,0,0,0.3)',
+                        borderRadius: '3px',
+                        height: '80%',
+                        top: '10%',
+                        opacity: 0.8,
+                        cursor: 'pointer',
+                        display: 'flex',
+                        alignItems: 'center',
+                        padding: '0 4px',
+                        fontSize: '10px',
+                        color: '#fff',
+                        overflow: 'hidden',
+                        whiteSpace: 'nowrap'
+                      }}
+                      title="Double-click to delete"
+                      onDoubleClick={() => removeAudioSegment(seg.id)}
+                    >
+                       {seg.type.toUpperCase()}
+                    </div>
+                  );
+                })}
+                <div
+                  className="timeline-playhead"
+                  style={{ left: `${timeToPct(displayTime)}%`, opacity: 0.5 }}
+                  aria-hidden="true"
+                />
+              </div>
+            </div>
           </div>
         </div>
       </div>

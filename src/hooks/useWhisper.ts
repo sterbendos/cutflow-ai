@@ -1,46 +1,29 @@
 import { useState, useRef, useCallback } from 'react';
-import { pipeline, env, AutomaticSpeechRecognitionPipeline } from '@huggingface/transformers';
 import { invoke } from '@tauri-apps/api/core';
-
-// Ensure transformers.js uses local browser cache and doesn't crash on WASM loading
-env.allowLocalModels = false; // We use HuggingFace Hub directly to cache it in browser
 
 export interface TranscriptWord {
   text: string;
   start: number;
   end: number;
+  importance?: number;
 }
 
 export function useWhisper() {
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [transcript, setTranscript] = useState<TranscriptWord[]>([]);
-  const transcriberRef = useRef<AutomaticSpeechRecognitionPipeline | null>(null);
+  const [language, setLanguage] = useState<string>('');
+  const workerRef = useRef<Worker | null>(null);
 
-  const initTranscriber = async () => {
-    if (!transcriberRef.current) {
-      transcriberRef.current = await pipeline(
-        'automatic-speech-recognition',
-        'Xenova/whisper-tiny.en',
-        {
-          progress_callback: (progress: any) => {
-            console.log('Downloading Whisper model:', progress);
-          },
-        }
-      );
-    }
-    return transcriberRef.current;
-  };
-
-  const transcribeVideo = useCallback(async (videoPath: string) => {
+  const transcribeVideo = useCallback(async (videoPath: string, language?: string) => {
     if (!videoPath) return;
     setIsTranscribing(true);
     setTranscript([]);
 
     try {
-      // 1. Extract audio via Tauri backend (returns absolute path to temp wav)
+      // 1. Extract audio via Tauri backend
       const wavPath = await invoke<string>('extract_audio_for_transcription', { videoPath });
 
-      // 2. Fetch the local wav file from Tauri asset protocol
+      // 2. Fetch the local wav file
       const { convertFileSrc } = await import('@tauri-apps/api/core');
       const assetUrl = convertFileSrc(wavPath);
       
@@ -52,30 +35,32 @@ export function useWhisper() {
       const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
       const audioData = audioBuffer.getChannelData(0); // Float32Array
 
-      // 4. Initialize AI
-      const transcriber = await initTranscriber();
-
-      // 5. Transcribe
-      const output = await transcriber(audioData, {
-        chunk_length_s: 30,
-        stride_length_s: 5,
-        return_timestamps: 'word',
-      });
-
-      if (output && Array.isArray((output as any).chunks)) {
-        const words = (output as any).chunks.map((chunk: any) => ({
-          text: chunk.text,
-          start: chunk.timestamp[0],
-          end: chunk.timestamp[1] || chunk.timestamp[0] + 0.5,
-        }));
-        setTranscript(words);
+      // 4. Initialize Worker if not already
+      if (!workerRef.current) {
+        workerRef.current = new Worker(new URL('../workers/whisper.worker.ts', import.meta.url), {
+          type: 'module'
+        });
       }
+
+      // 5. Send message and wait for completion
+      workerRef.current.onmessage = (e) => {
+        const { status, transcript, error } = e.data;
+        if (status === 'complete') {
+          setTranscript(transcript);
+          setIsTranscribing(false);
+        } else if (status === 'error') {
+          console.error('Whisper Worker Error:', error);
+          setIsTranscribing(false);
+        }
+      };
+
+      workerRef.current.postMessage({ type: 'transcribe', audioData, language });
+
     } catch (err) {
       console.error('Transcription failed:', err);
-    } finally {
       setIsTranscribing(false);
     }
   }, []);
 
-  return { transcript, isTranscribing, transcribeVideo };
+  return { transcript, isTranscribing, transcribeVideo, language, setLanguage };
 }
