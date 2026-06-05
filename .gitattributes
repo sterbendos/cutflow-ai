@@ -1,0 +1,13 @@
+# GitHub Linguist overrides
+# Ignore generated/lockfiles from language stats
+src-tauri/Cargo.lock linguist-generated=true
+src-tauri/rustup-init.exe linguist-vendored=true
+package-lock.json linguist-generated=true
+
+# Explicitly mark Rust source
+src-tauri/src/*.rs linguist-language=Rust
+src-tauri/build.rs linguist-language=Rust
+
+# Mark TypeScript/React source
+src/**/*.tsx linguist-language=TSX
+src/**/*.ts linguist-language=TypeScript
