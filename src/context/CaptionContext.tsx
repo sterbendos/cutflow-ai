@@ -1,4 +1,4 @@
-import React, { createContext, useCallback, useContext, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
 
 export interface CaptionWordStyle {
   bold: boolean;
@@ -22,6 +22,7 @@ export interface CaptionStyle {
   maxWidth: number;
   letterSpacing: number;
   lineHeight: number;
+  highlightColor: string;
   wordStyle: 'none' | 'teal-highlight' | 'bold-keywords' | 'gradient' | 'active-word-color' | 'active-word-crab';
 }
 
@@ -42,6 +43,7 @@ export const defaultCaptionStyle: CaptionStyle = {
   maxWidth: 90,
   letterSpacing: 0.02,
   lineHeight: 1.4,
+  highlightColor: '#14b8a6',
   wordStyle: 'teal-highlight',
 };
 
@@ -151,8 +153,23 @@ interface CaptionContextValue {
 
 const CaptionContext = createContext<CaptionContextValue | null>(null);
 
+const STORAGE_KEY = 'cutflow-caption-style';
+
+function loadSavedStyle(): CaptionStyle {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) return { ...defaultCaptionStyle, ...JSON.parse(raw) };
+  } catch {}
+  return defaultCaptionStyle;
+}
+
 export function CaptionProvider({ children }: { children: React.ReactNode }) {
-  const [style, setStyle] = useState<CaptionStyle>(defaultCaptionStyle);
+  const [style, setStyle] = useState<CaptionStyle>(loadSavedStyle);
+
+  // Persist to localStorage on every style change
+  useEffect(() => {
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(style)); } catch {}
+  }, [style]);
 
   const updateStyle = useCallback((partial: Partial<CaptionStyle>) => {
     setStyle((prev) => ({ ...prev, ...partial }));

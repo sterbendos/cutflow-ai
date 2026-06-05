@@ -1,16 +1,16 @@
 import { useCaption, CaptionStyle } from '../context/CaptionContext';
 
-const FONT_FAMILIES = [
-  "'Outfit', 'Inter', sans-serif",
-  "'Inter', sans-serif",
-  "'Georgia', 'Times New Roman', serif",
-  "'SF Mono', 'Fira Code', monospace",
-  "'Playfair Display', serif",
-  "'Space Grotesk', sans-serif",
-  "'Montserrat', sans-serif",
-  "'Rubik Bubbles', cursive",
-  "'Bungee', cursive",
-  "'Permanent Marker', cursive",
+const FONT_FAMILIES: { label: string; value: string }[] = [
+  { label: 'Outfit (Default)', value: "'Outfit', 'Inter', sans-serif" },
+  { label: 'Inter', value: "'Inter', sans-serif" },
+  { label: 'Space Grotesk', value: "'Space Grotesk', sans-serif" },
+  { label: 'Montserrat', value: "'Montserrat', sans-serif" },
+  { label: 'Playfair Display', value: "'Playfair Display', serif" },
+  { label: 'Georgia (Classic)', value: "'Georgia', 'Times New Roman', serif" },
+  { label: 'Rubik Bubbles', value: "'Rubik Bubbles', cursive" },
+  { label: 'Bungee', value: "'Bungee', cursive" },
+  { label: 'Permanent Marker', value: "'Permanent Marker', cursive" },
+  { label: 'SF Mono (Code)', value: "'SF Mono', 'Fira Code', monospace" },
 ];
 
 const ANIMATIONS = ['none', 'fade', 'slide-up', 'highlight'] as const;
@@ -136,12 +136,21 @@ export default function CaptionEditor() {
       {/* Font */}
       <div className="caption-editor__section">
         <span className="sidebar__section-title">Font</span>
-        <SelectField
-          label="Family"
-          value={style.fontFamily}
-          options={FONT_FAMILIES}
-          onChange={(v) => updateStyle({ fontFamily: v })}
-        />
+        <div className="caption-field">
+          <span className="caption-field__label">Family</span>
+          <select
+            value={style.fontFamily}
+            onChange={(e) => updateStyle({ fontFamily: e.target.value })}
+            className="caption-field__select"
+            style={{ fontFamily: style.fontFamily }}
+          >
+            {FONT_FAMILIES.map((f) => (
+              <option key={f.value} value={f.value} style={{ fontFamily: f.value }}>
+                {f.label}
+              </option>
+            ))}
+          </select>
+        </div>
         <div className="caption-field-row">
           <div style={{ flex: 1 }}>
             <RangeSlider
@@ -178,6 +187,14 @@ export default function CaptionEditor() {
           step={1}
           unit="em"
           onChange={(v) => updateStyle({ letterSpacing: v / 100 })}
+        />
+        <RangeSlider
+          label="Line height"
+          value={style.lineHeight}
+          min={1}
+          max={2.5}
+          step={0.05}
+          onChange={(v) => updateStyle({ lineHeight: v })}
         />
       </div>
 
@@ -250,6 +267,13 @@ export default function CaptionEditor() {
           options={WORD_STYLES}
           onChange={(v) => updateStyle({ wordStyle: v as CaptionStyle['wordStyle'] })}
         />
+        {style.wordStyle !== 'none' && style.wordStyle !== 'bold-keywords' && (
+          <ColorInput
+            label="Highlight color"
+            value={style.highlightColor}
+            onChange={(v) => updateStyle({ highlightColor: v })}
+          />
+        )}
         <div className="caption-field">
           <label className="caption-field__checkbox">
             <input

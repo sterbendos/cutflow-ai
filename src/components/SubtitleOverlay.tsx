@@ -117,9 +117,9 @@ function renderWord(activeSubtitle: any, style: ReturnType<typeof useCaption>['s
 
         if (style.wordStyle === 'active-word-crab' && isActive) {
           return (
-            <span key={i} style={{ position: 'relative', color: '#ff7b72', textShadow: '0 0 8px rgba(255,123,114,0.6)', fontWeight: 900 }}>
+            <span key={i} style={{ position: 'relative', color: style.highlightColor, textShadow: `0 0 8px ${style.highlightColor}99`, fontWeight: 900 }}>
               <span style={{ position: 'absolute', top: '-1.2em', left: '50%', transform: 'translateX(-50%)', animation: 'bounce 0.4s infinite alternate' }}>
-                <ClaudeCrab color="#ff7b72" />
+                <ClaudeCrab color={style.highlightColor} />
               </span>
               {word}{' '}
             </span>
@@ -128,7 +128,7 @@ function renderWord(activeSubtitle: any, style: ReturnType<typeof useCaption>['s
 
         if (style.wordStyle === 'active-word-color' && isActive) {
           return (
-            <span key={i} style={{ color: '#fbbf24', textShadow: '0 0 10px rgba(251, 191, 36, 0.6)' }}>
+            <span key={i} style={{ color: style.highlightColor, textShadow: `0 0 10px ${style.highlightColor}99` }}>
               {word}{' '}
             </span>
           );
@@ -147,8 +147,8 @@ function renderWord(activeSubtitle: any, style: ReturnType<typeof useCaption>['s
             <span
               key={i}
               style={{
-                color: '#14b8a6',
-                textShadow: '0 0 10px rgba(20, 184, 166, 0.5)',
+                color: style.highlightColor,
+                textShadow: `0 0 10px ${style.highlightColor}80`,
                 transition: 'color 0.1s',
               }}
             >
@@ -158,11 +158,12 @@ function renderWord(activeSubtitle: any, style: ReturnType<typeof useCaption>['s
         }
 
         if (style.wordStyle === 'gradient' && isImportant) {
+          // Build a gradient from highlightColor to a shifted hue
           return (
             <span
               key={i}
               style={{
-                background: 'linear-gradient(135deg, #14b8a6, #0ea5e9)',
+                background: `linear-gradient(135deg, ${style.highlightColor}, #0ea5e9)`,
                 WebkitBackgroundClip: 'text',
                 WebkitTextFillColor: 'transparent',
                 backgroundClip: 'text',

@@ -121,22 +121,32 @@ export default function VideoPlayer() {
 
   const activeBRoll = state.bRolls.find(b => currentTime >= b.start && currentTime < b.start + b.duration);
   const bRollVideoRef = useRef<HTMLVideoElement>(null);
+  const prevBRollIdRef = useRef<string | null>(null);
 
   useEffect(() => {
-    if (activeBRoll && bRollVideoRef.current) {
+    const vid = bRollVideoRef.current;
+    if (!vid) return;
+
+    if (activeBRoll) {
       const src = convertFileSrc(activeBRoll.path);
-      if (bRollVideoRef.current.src !== src) {
-        bRollVideoRef.current.src = src;
+      // Only reload src when the b-roll segment changes
+      if (prevBRollIdRef.current !== activeBRoll.id) {
+        vid.src = src;
+        vid.load();
+        prevBRollIdRef.current = activeBRoll.id;
       }
       const expectedTime = currentTime - activeBRoll.start;
-      if (Math.abs(bRollVideoRef.current.currentTime - expectedTime) > 0.3) {
-        bRollVideoRef.current.currentTime = expectedTime;
+      if (Math.abs(vid.currentTime - expectedTime) > 0.3) {
+        vid.currentTime = expectedTime;
       }
       if (isPlaying) {
-        bRollVideoRef.current.play().catch(() => {});
+        vid.play().catch(() => {});
       } else {
-        bRollVideoRef.current.pause();
+        vid.pause();
       }
+    } else {
+      vid.pause();
+      prevBRollIdRef.current = null;
     }
   }, [activeBRoll, currentTime, isPlaying]);
 
@@ -273,22 +283,24 @@ export default function VideoPlayer() {
           }}
           onClick={togglePlay}
         />
-        {activeBRoll && (
-          <video
-            ref={bRollVideoRef}
-            muted
-            style={{
-              position: 'absolute',
-              maxWidth: '100%',
-              maxHeight: '100%',
-              objectFit: 'contain',
-              aspectRatio: state.aspectRatio,
-              zIndex: 5,
-              background: '#000'
-            }}
-            onClick={togglePlay}
-          />
-        )}
+        {/* B-Roll overlay — always mounted, fades in/out via opacity */}
+        <video
+          ref={bRollVideoRef}
+          muted
+          style={{
+            position: 'absolute',
+            maxWidth: '100%',
+            maxHeight: '100%',
+            objectFit: 'contain',
+            aspectRatio: state.aspectRatio,
+            zIndex: 5,
+            background: '#000',
+            opacity: activeBRoll ? 1 : 0,
+            transition: 'opacity 0.25s ease',
+            pointerEvents: activeBRoll ? 'auto' : 'none',
+          }}
+          onClick={togglePlay}
+        />
       </div>
 
       {/* Subtitles Overlay — dynamicPosition set by face detection */}
