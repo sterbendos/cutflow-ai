@@ -82,13 +82,14 @@ export default function SubtitleOverlay({ visible, dynamicPosition }: SubtitleOv
           ...bgStyle,
         }}
       >
-        {renderWord(activeSubtitle.text, style)}
+        {renderWord(activeSubtitle, style, state.current_time)}
       </div>
     </div>
   );
 }
 
-function renderWord(text: string, style: ReturnType<typeof useCaption>['style']) {
+function renderWord(activeSubtitle: any, style: ReturnType<typeof useCaption>['style'], currentTime: number) {
+  const text = activeSubtitle.text;
   if (style.wordStyle === 'none') {
     return <span>{text}</span>;
   }
@@ -101,11 +102,37 @@ function renderWord(text: string, style: ReturnType<typeof useCaption>['style'])
     'or', 'so', 'if', 'no', 'up', 'me', 'he', 'she', 'his', 'her',
   ]);
 
+  const chunkDuration = activeSubtitle.end - activeSubtitle.start;
+  const wordDuration = chunkDuration / words.length;
+
   return (
     <>
-      {words.map((word, i) => {
+      {words.map((word: string, i: number) => {
         const clean = word.toLowerCase().replace(/[^a-z0-9]/g, '');
         const isImportant = clean.length > 3 && !stopwords.has(clean);
+        
+        const wordStart = activeSubtitle.start + i * wordDuration;
+        const wordEnd = wordStart + wordDuration;
+        const isActive = currentTime >= wordStart && currentTime < wordEnd;
+
+        if (style.wordStyle === 'active-word-crab' && isActive) {
+          return (
+            <span key={i} style={{ position: 'relative', color: '#ff7b72', textShadow: '0 0 8px rgba(255,123,114,0.6)', fontWeight: 900 }}>
+              <span style={{ position: 'absolute', top: '-1.2em', left: '50%', transform: 'translateX(-50%)', animation: 'bounce 0.4s infinite alternate' }}>
+                <ClaudeCrab color="#ff7b72" />
+              </span>
+              {word}{' '}
+            </span>
+          );
+        }
+
+        if (style.wordStyle === 'active-word-color' && isActive) {
+          return (
+            <span key={i} style={{ color: '#fbbf24', textShadow: '0 0 10px rgba(251, 191, 36, 0.6)' }}>
+              {word}{' '}
+            </span>
+          );
+        }
 
         if (style.wordStyle === 'bold-keywords' && isImportant) {
           return (
@@ -151,3 +178,20 @@ function renderWord(text: string, style: ReturnType<typeof useCaption>['style'])
     </>
   );
 }
+
+const ClaudeCrab = ({ className, color = '#ff7b72' }: { className?: string, color?: string }) => (
+  <svg className={className} viewBox="0 0 10 7" fill={color} style={{ width: '1.2em', height: '0.84em', display: 'block' }}>
+    <rect x="2" y="0" width="1" height="1" />
+    <rect x="7" y="0" width="1" height="1" />
+    <rect x="1" y="1" width="8" height="1" />
+    <rect x="0" y="2" width="10" height="1" />
+    <rect x="0" y="3" width="10" height="1" />
+    <rect x="1" y="4" width="8" height="1" />
+    <rect x="2" y="5" width="1" height="1" />
+    <rect x="4" y="5" width="1" height="1" />
+    <rect x="5" y="5" width="1" height="1" />
+    <rect x="7" y="5" width="1" height="1" />
+    <rect x="2" y="6" width="1" height="1" />
+    <rect x="7" y="6" width="1" height="1" />
+  </svg>
+);

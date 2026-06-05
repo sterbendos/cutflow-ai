@@ -22,7 +22,7 @@ export interface CaptionStyle {
   maxWidth: number;
   letterSpacing: number;
   lineHeight: number;
-  wordStyle: 'none' | 'teal-highlight' | 'bold-keywords' | 'gradient';
+  wordStyle: 'none' | 'teal-highlight' | 'bold-keywords' | 'gradient' | 'active-word-color' | 'active-word-crab';
 }
 
 export const defaultCaptionStyle: CaptionStyle = {

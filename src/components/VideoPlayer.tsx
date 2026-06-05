@@ -119,6 +119,27 @@ export default function VideoPlayer() {
     onTimeUpdate: setCurrentTime,
   });
 
+  const activeBRoll = state.bRolls.find(b => currentTime >= b.start && currentTime < b.start + b.duration);
+  const bRollVideoRef = useRef<HTMLVideoElement>(null);
+
+  useEffect(() => {
+    if (activeBRoll && bRollVideoRef.current) {
+      const src = convertFileSrc(activeBRoll.path);
+      if (bRollVideoRef.current.src !== src) {
+        bRollVideoRef.current.src = src;
+      }
+      const expectedTime = currentTime - activeBRoll.start;
+      if (Math.abs(bRollVideoRef.current.currentTime - expectedTime) > 0.3) {
+        bRollVideoRef.current.currentTime = expectedTime;
+      }
+      if (isPlaying) {
+        bRollVideoRef.current.play().catch(() => {});
+      } else {
+        bRollVideoRef.current.pause();
+      }
+    }
+  }, [activeBRoll, currentTime, isPlaying]);
+
   // ── Load video source when path changes ───────────────────
   useEffect(() => {
     const video = videoRef.current;
@@ -252,6 +273,22 @@ export default function VideoPlayer() {
           }}
           onClick={togglePlay}
         />
+        {activeBRoll && (
+          <video
+            ref={bRollVideoRef}
+            muted
+            style={{
+              position: 'absolute',
+              maxWidth: '100%',
+              maxHeight: '100%',
+              objectFit: 'contain',
+              aspectRatio: state.aspectRatio,
+              zIndex: 5,
+              background: '#000'
+            }}
+            onClick={togglePlay}
+          />
+        )}
       </div>
 
       {/* Subtitles Overlay — dynamicPosition set by face detection */}

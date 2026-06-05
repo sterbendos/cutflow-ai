@@ -7,12 +7,16 @@ const FONT_FAMILIES = [
   "'SF Mono', 'Fira Code', monospace",
   "'Playfair Display', serif",
   "'Space Grotesk', sans-serif",
+  "'Montserrat', sans-serif",
+  "'Rubik Bubbles', cursive",
+  "'Bungee', cursive",
+  "'Permanent Marker', cursive",
 ];
 
 const ANIMATIONS = ['none', 'fade', 'slide-up', 'highlight'] as const;
 const POSITIONS = ['bottom', 'top'] as const;
 const ALIGNMENTS = ['left', 'center', 'right'] as const;
-const WORD_STYLES = ['none', 'teal-highlight', 'bold-keywords', 'gradient'] as const;
+const WORD_STYLES = ['none', 'teal-highlight', 'bold-keywords', 'gradient', 'active-word-color', 'active-word-crab'] as const;
 
 function ColorInput({
   label,

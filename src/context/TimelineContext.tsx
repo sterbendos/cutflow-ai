@@ -37,10 +37,19 @@ export interface AudioSegment {
   type: 'sfx' | 'music' | 'voice';
 }
 
+export interface BRollSegment {
+  id: string;
+  path: string;
+  name: string;
+  start: number;
+  duration: number;
+}
+
 export interface TimelineState {
   source_video_path: string;
   edl: EdlSegment[];
   audioEdl: AudioSegment[];
+  bRolls: BRollSegment[];
   transitionType: TransitionType;
   transitionDuration: number;
   current_time: number;
@@ -64,6 +73,8 @@ type TimelineAction =
   | { type: 'SET_TRANSITION'; payload: { type: TransitionType; duration: number } }
   | { type: 'ADD_AUDIO_SEGMENT'; payload: AudioSegment }
   | { type: 'REMOVE_AUDIO_SEGMENT'; payload: string }
+  | { type: 'ADD_BROLL_SEGMENT'; payload: BRollSegment }
+  | { type: 'REMOVE_BROLL_SEGMENT'; payload: string }
   | { type: 'SET_ASPECT_RATIO'; payload: AspectRatio }
   | { type: 'SET_TRANSCRIPT_JSON'; payload: { text: string; start: number; end: number }[] };
 
@@ -71,6 +82,7 @@ const initialState: TimelineState = {
   source_video_path: '',
   edl: [],
   audioEdl: [],
+  bRolls: [],
   transitionType: 'none',
   transitionDuration: 0.3,
   current_time: 0,
@@ -133,6 +145,15 @@ function timelineReducer(
         audioEdl: state.audioEdl.filter((s) => s.id !== action.payload),
       };
 
+    case 'ADD_BROLL_SEGMENT':
+      return { ...state, bRolls: [...state.bRolls, action.payload] };
+
+    case 'REMOVE_BROLL_SEGMENT':
+      return {
+        ...state,
+        bRolls: state.bRolls.filter((s) => s.id !== action.payload),
+      };
+
     case 'SET_ASPECT_RATIO':
       return { ...state, aspectRatio: action.payload };
 
@@ -167,6 +188,8 @@ interface TimelineContextValue {
   setTransition: (type: TransitionType, duration: number) => void;
   addAudioSegment: (segment: AudioSegment) => void;
   removeAudioSegment: (id: string) => void;
+  addBRollSegment: (segment: BRollSegment) => void;
+  removeBRollSegment: (id: string) => void;
   setAspectRatio: (ratio: AspectRatio) => void;
   language: string;
   setLanguage: (lang: string) => void;
@@ -394,6 +417,14 @@ export function TimelineProvider({ children }: { children: React.ReactNode }) {
     dispatch({ type: 'REMOVE_AUDIO_SEGMENT', payload: id });
   }, []);
 
+  const addBRollSegment = useCallback((segment: BRollSegment) => {
+    dispatch({ type: 'ADD_BROLL_SEGMENT', payload: segment });
+  }, []);
+
+  const removeBRollSegment = useCallback((id: string) => {
+    dispatch({ type: 'REMOVE_BROLL_SEGMENT', payload: id });
+  }, []);
+
   const setAspectRatio = useCallback((ratio: AspectRatio) => {
     dispatch({ type: 'SET_ASPECT_RATIO', payload: ratio });
   }, []);
@@ -442,6 +473,8 @@ export function TimelineProvider({ children }: { children: React.ReactNode }) {
         setTransition,
         addAudioSegment,
         removeAudioSegment,
+        addBRollSegment,
+        removeBRollSegment,
         setAspectRatio,
         language,
         setLanguage,

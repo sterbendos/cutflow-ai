@@ -111,7 +111,7 @@ let globalActiveId: string | null = null;
 // ─── Main Component ──────────────────────────────────────────
 
 export default function AssetBrowser() {
-  const { loadVideo, analyzeVideo } = useTimeline();
+  const { loadVideo, analyzeVideo, addBRollSegment, state } = useTimeline();
   const [assets, setAssets] = useState<MediaAsset[]>(globalAssetCache);
   const [activeId, setActiveId] = useState<string | null>(globalActiveId);
   const [searchQuery, setSearchQuery] = useState('');
@@ -433,6 +433,42 @@ export default function AssetBrowser() {
                 >
                   ✕
                 </button>
+                
+                {/* B-Roll Add Button */}
+                {asset.type === 'video' && (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      addBRollSegment({
+                        id: crypto.randomUUID(),
+                        path: asset.path,
+                        name: asset.name,
+                        start: state.current_time,
+                        duration: asset.duration
+                      });
+                    }}
+                    style={{
+                      position: 'absolute',
+                      top: 2,
+                      right: 20,
+                      width: 16,
+                      height: 16,
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      fontSize: 9,
+                      background: 'rgba(20, 184, 166, 0.8)',
+                      color: '#fff',
+                      border: 'none',
+                      borderRadius: '3px',
+                      cursor: 'pointer',
+                      opacity: 0.8,
+                    }}
+                    title="Add as B-Roll at current time"
+                  >
+                    +
+                  </button>
+                )}
               </motion.div>
             ))}
           </motion.div>
@@ -473,21 +509,48 @@ export default function AssetBrowser() {
                 <span style={{ fontSize: 10, color: 'var(--text-subtle)', fontFamily: 'monospace', flexShrink: 0 }}>
                   {formatDuration(asset.duration)}
                 </span>
-                <button
-                  onClick={(e) => { e.stopPropagation(); deleteAsset(asset.id); }}
-                  style={{
-                    padding: '1px 5px',
-                    fontSize: 9,
-                    color: 'var(--text-muted)',
-                    background: 'none',
-                    border: '1px solid var(--border)',
-                    borderRadius: 3,
-                    cursor: 'pointer',
-                    flexShrink: 0,
-                  }}
-                >
-                  ✕
-                </button>
+                <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>
+                  {asset.type === 'video' && (
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        addBRollSegment({
+                          id: crypto.randomUUID(),
+                          path: asset.path,
+                          name: asset.name,
+                          start: state.current_time,
+                          duration: asset.duration
+                        });
+                      }}
+                      style={{
+                        padding: '1px 5px',
+                        fontSize: 9,
+                        color: 'var(--teal-primary)',
+                        background: 'rgba(20, 184, 166, 0.1)',
+                        border: '1px solid rgba(20, 184, 166, 0.3)',
+                        borderRadius: 3,
+                        cursor: 'pointer',
+                      }}
+                      title="Add as B-Roll at current time"
+                    >
+                      + B-Roll
+                    </button>
+                  )}
+                  <button
+                    onClick={(e) => { e.stopPropagation(); deleteAsset(asset.id); }}
+                    style={{
+                      padding: '1px 5px',
+                      fontSize: 9,
+                      color: 'var(--text-muted)',
+                      background: 'none',
+                      border: '1px solid var(--border)',
+                      borderRadius: 3,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    ✕
+                  </button>
+                </div>
               </motion.div>
             ))}
           </motion.div>

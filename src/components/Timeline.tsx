@@ -36,7 +36,7 @@ function getSegmentTitle(seg: EdlSegment): string {
 // ─────────────────────────────────────────────────────────────
 
 export default function Timeline() {
-  const { state, markSegment, splitSegment, removeAudioSegment } = useTimeline();
+  const { state, markSegment, splitSegment, removeAudioSegment, transcript, removeBRollSegment } = useTimeline();
   const railRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const [isDraggingPlayhead, setIsDraggingPlayhead] = useState(false);
@@ -313,9 +313,101 @@ export default function Timeline() {
           </div>
 
           {/* Tracks */}
-          <div className="timeline-tracks">
+          <div className="timeline-tracks" style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+            
+            {/* Subtitle track */}
+            <div className="timeline-track" style={{ height: 28, background: 'rgba(0,0,0,0.1)' }}>
+              <span className="timeline-track__label" aria-label="Subtitle track" style={{ position: 'sticky', left: 0, zIndex: 10, fontSize: 9 }}>
+                SUBTITLES
+              </span>
+              <div
+                className="timeline-track__rail"
+                style={{ cursor: 'default' }}
+                aria-label="Subtitle timeline"
+              >
+                {transcript.map((word, idx) => {
+                  if (hideCuts) {
+                    // Check if the word is in a deleted portion
+                    const inKeep = state.edl.some(seg => seg.segment_type === 'keep' && word.start >= seg.start && word.start < seg.end);
+                    if (!inKeep) return null;
+                  }
+                  const leftPct = timeToPct(word.start);
+                  const widthPct = timeToPct(word.end) - leftPct;
+                  if (widthPct <= 0) return null;
+                  
+                  return (
+                    <div
+                      key={`word-${idx}`}
+                      style={{
+                        position: 'absolute',
+                        left: `${leftPct}%`,
+                        width: `${widthPct}%`,
+                        background: '#eab308',
+                        borderRadius: '2px',
+                        height: '60%',
+                        top: '20%',
+                        opacity: 0.8,
+                        fontSize: '9px',
+                        color: '#000',
+                        overflow: 'hidden',
+                        whiteSpace: 'nowrap',
+                        padding: '0 2px'
+                      }}
+                    >
+                      {word.text}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* B-Roll track */}
+            <div className="timeline-track" style={{ height: 32, background: 'rgba(0,0,0,0.1)' }}>
+              <span className="timeline-track__label" aria-label="B-Roll track" style={{ position: 'sticky', left: 0, zIndex: 10, fontSize: 9 }}>
+                B-ROLL
+              </span>
+              <div
+                className="timeline-track__rail"
+                style={{ cursor: 'default' }}
+                aria-label="B-Roll timeline"
+              >
+                {state.bRolls.map((seg) => {
+                  const leftPct = timeToPct(seg.start);
+                  const widthPct = timeToPct(seg.start + seg.duration) - leftPct;
+                  return (
+                    <div
+                      key={seg.id}
+                      style={{
+                        position: 'absolute',
+                        left: `${leftPct}%`,
+                        width: `${widthPct}%`,
+                        background: '#0ea5e9',
+                        border: '1px solid rgba(0,0,0,0.3)',
+                        borderRadius: '3px',
+                        height: '80%',
+                        top: '10%',
+                        opacity: 0.9,
+                        cursor: 'pointer',
+                        display: 'flex',
+                        alignItems: 'center',
+                        padding: '0 4px',
+                        fontSize: '10px',
+                        color: '#fff',
+                        overflow: 'hidden',
+                        whiteSpace: 'nowrap'
+                      }}
+                      title="Double-click to remove B-Roll"
+                      onDoubleClick={() => removeBRollSegment(seg.id)}
+                    >
+                       {seg.name}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
             {/* Video track */}
-            <div className="timeline-track">
+            <div className="timeline-track" style={{ height: 48 }}>
               <span className="timeline-track__label" aria-label="Video track" style={{ position: 'sticky', left: 0, zIndex: 10 }}>
                 VIDEO
               </span>
