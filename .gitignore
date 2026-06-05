@@ -9,3 +9,6 @@ dist/
 .vscode/
 *.wav
 *.mp4
+
+# Vendor WASM/JS bundles - never commit these
+public/ort-wasm/
