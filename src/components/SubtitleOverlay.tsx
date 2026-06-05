@@ -1,12 +1,15 @@
 import { useMemo } from 'react';
 import { useTimeline } from '../context/TimelineContext';
 import { useCaption, getBgCss } from '../context/CaptionContext';
+import type { SubtitlePlacement } from '../hooks/useFaceDetection';
 
 interface SubtitleOverlayProps {
   visible: boolean;
+  /** When provided by face detection, overrides the style's position setting */
+  dynamicPosition?: SubtitlePlacement;
 }
 
-export default function SubtitleOverlay({ visible }: SubtitleOverlayProps) {
+export default function SubtitleOverlay({ visible, dynamicPosition }: SubtitleOverlayProps) {
   const { state, transcript } = useTimeline();
   const { style } = useCaption();
 
@@ -27,6 +30,10 @@ export default function SubtitleOverlay({ visible }: SubtitleOverlayProps) {
 
   if (!visible || !activeSubtitle) return null;
 
+  // Resolve the effective position:
+  // dynamicPosition (face-aware) takes priority, falls back to style setting
+  const effectivePosition: 'top' | 'bottom' = dynamicPosition ?? style.position;
+
   const bgCss = getBgCss(style);
   const bgStyle: React.CSSProperties = style.bgOpacity > 0
     ? {
@@ -38,17 +45,23 @@ export default function SubtitleOverlay({ visible }: SubtitleOverlayProps) {
 
   const animClass = style.animation !== 'none' ? `caption-anim-${style.animation}` : '';
 
+  // Smooth transition when position changes so text slides rather than snaps
+  const positionStyle: React.CSSProperties =
+    effectivePosition === 'bottom'
+      ? { bottom: '40px', top: 'auto' }
+      : { top: '20px', bottom: 'auto' };
+
   return (
     <div
       style={{
         position: 'absolute',
-        bottom: style.position === 'bottom' ? '40px' : 'auto',
-        top: style.position === 'top' ? '20px' : 'auto',
+        ...positionStyle,
         left: `${(100 - style.maxWidth) / 2}%`,
         width: `${style.maxWidth}%`,
         textAlign: style.alignment,
         pointerEvents: 'none',
         zIndex: 50,
+        transition: 'top 0.4s ease, bottom 0.4s ease',
       }}
     >
       <div

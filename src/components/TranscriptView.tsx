@@ -53,7 +53,15 @@ interface TranscriptViewProps {
 }
 
 export default function TranscriptView({ transcript: externalTranscript }: TranscriptViewProps) {
-  const { state, deleteRange, transcript: globalTranscript, isTranscribing } = useTimeline();
+  const {
+    state, deleteRange,
+    transcript: globalTranscript,
+    isTranscribing,
+    transcriptStatus,
+    transcriptError,
+    transcriptProgress,
+    retranscribe,
+  } = useTimeline();
   const activeWordRef = useRef<HTMLSpanElement | null>(null);
   const panelRef = useRef<HTMLDivElement>(null);
 
@@ -234,14 +242,65 @@ export default function TranscriptView({ transcript: externalTranscript }: Trans
 
       {/* Body */}
       <div ref={panelRef} className="transcript-panel__body" id="transcript-body">
-        {isTranscribing && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16 }}>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--teal-primary)" strokeWidth="2.5" strokeLinecap="round">
-              <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83">
-                <animateTransform attributeName="transform" type="rotate" from="0 12 12" to="360 12 12" dur="1s" repeatCount="indefinite"/>
-              </path>
-            </svg>
-            <span style={{ fontSize: 12, color: 'var(--teal-primary)', fontWeight: 500 }}>AI Transcription in progress...</span>
+        {/* ── Status bar ── */}
+        {(isTranscribing || transcriptStatus === 'error') && (
+          <div style={{
+            display: 'flex', flexDirection: 'column', gap: 6,
+            marginBottom: 16, padding: '10px 12px',
+            background: transcriptStatus === 'error'
+              ? 'rgba(239,68,68,0.08)'
+              : 'rgba(20,184,166,0.06)',
+            borderRadius: 8,
+            border: `1px solid ${transcriptStatus === 'error' ? 'rgba(239,68,68,0.25)' : 'rgba(20,184,166,0.2)'}`,
+          }}>
+            {transcriptStatus === 'error' ? (
+              <>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#ef4444" strokeWidth="2" strokeLinecap="round">
+                    <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+                  </svg>
+                  <span style={{ fontSize: 11, color: '#ef4444', fontWeight: 600 }}>Transcription failed</span>
+                  <button
+                    onClick={() => retranscribe()}
+                    style={{
+                      marginLeft: 'auto', fontSize: 10, padding: '2px 8px',
+                      background: 'rgba(239,68,68,0.15)', border: '1px solid rgba(239,68,68,0.3)',
+                      borderRadius: 4, color: '#ef4444', cursor: 'pointer',
+                    }}
+                  >Retry</button>
+                </div>
+                <span style={{
+                  fontSize: 10, color: 'var(--text-muted)', lineHeight: 1.4,
+                  fontFamily: 'monospace', wordBreak: 'break-all',
+                }}
+                >{transcriptError}</span>
+              </>
+            ) : (
+              <>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--teal-primary)" strokeWidth="2.5" strokeLinecap="round">
+                    <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83">
+                      <animateTransform attributeName="transform" type="rotate" from="0 12 12" to="360 12 12" dur="1s" repeatCount="indefinite"/>
+                    </path>
+                  </svg>
+                  <span style={{ fontSize: 11, color: 'var(--teal-primary)', fontWeight: 500 }}>
+                    {transcriptStatus === 'extracting' && 'Extracting audio…'}
+                    {transcriptStatus === 'decoding'   && 'Decoding audio…'}
+                    {transcriptStatus === 'loading'    && `Loading Whisper model${transcriptProgress > 0 ? ` (${transcriptProgress}%)` : '…'}`}
+                    {transcriptStatus === 'transcribing' && 'Running AI transcription…'}
+                  </span>
+                </div>
+                {(transcriptStatus === 'loading' && transcriptProgress > 0) && (
+                  <div style={{ height: 3, background: 'rgba(20,184,166,0.15)', borderRadius: 2 }}>
+                    <div style={{
+                      height: '100%', width: `${transcriptProgress}%`,
+                      background: 'var(--teal-primary)', borderRadius: 2,
+                      transition: 'width 0.3s ease',
+                    }} />
+                  </div>
+                )}
+              </>
+            )}
           </div>
         )}
 

@@ -9,6 +9,7 @@ import { convertFileSrc } from '@tauri-apps/api/core';
 import SubtitleOverlay from './SubtitleOverlay';
 import MotionGraphicsOverlay from './MotionGraphicsOverlay';
 import AspectRatioSelector from './AspectRatioSelector';
+import { useFaceDetection } from '@/hooks/useFaceDetection';
 
 // ─── Icon helpers ─────────────────────────────────────────────
 
@@ -94,6 +95,14 @@ export default function VideoPlayer() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const videoUrlRef = useRef<string | null>(null);
   const [subtitlesVisible, setSubtitlesVisible] = useState(true);
+
+  // Face-aware subtitle placement — detects speaker face position
+  // and dynamically moves subtitles above or below it.
+  const faceSubtitlePlacement = useFaceDetection({
+    videoRef,
+    enabled: subtitlesVisible && Boolean(state.source_video_path),
+    intervalMs: 250,
+  });
 
   const {
     currentTime,
@@ -234,6 +243,7 @@ export default function VideoPlayer() {
           playsInline
           preload="metadata"
           aria-label="Video preview"
+          crossOrigin="anonymous"
           style={{
             maxWidth: '100%',
             maxHeight: '100%',
@@ -244,8 +254,8 @@ export default function VideoPlayer() {
         />
       </div>
 
-      {/* Subtitles Overlay */}
-      <SubtitleOverlay visible={subtitlesVisible} />
+      {/* Subtitles Overlay — dynamicPosition set by face detection */}
+      <SubtitleOverlay visible={subtitlesVisible} dynamicPosition={faceSubtitlePlacement} />
       {/* Motion Graphics Overlay */}
       <MotionGraphicsOverlay />
 

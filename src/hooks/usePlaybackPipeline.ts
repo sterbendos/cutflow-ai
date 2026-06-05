@@ -99,6 +99,12 @@ export function usePlaybackPipeline({
   silenceSkipRef.current = isSilenceSkipEnabled;
   onTimeUpdateRef.current = onTimeUpdate;
 
+  // Throttle React state updates to ~15fps to avoid re-rendering the full
+  // Timeline/VideoPlayer tree on every rAF tick (60-144Hz).
+  const frameCountRef = useRef(0);
+  const lastReactTimeRef = useRef(-1);
+  const lastActiveSegRef = useRef<EdlSegment | null>(null);
+
   // ── Core rAF Loop ──────────────────────────────────────────
   const tick = useCallback(() => {
     const video = videoRef.current;
@@ -108,33 +114,41 @@ export function usePlaybackPipeline({
     }
 
     const t = video.currentTime;
+    frameCountRef.current += 1;
 
-    // Update React state + parent callback
-    setCurrentTime(t);
-    onTimeUpdateRef.current(t);
-
-    // Find which segment the playhead is in
+    // Find which segment the playhead is in (pure computation, no state)
     const seg = findActiveSegment(t, edlRef.current);
-    setActiveSegment(seg);
 
-    // ── Silence Skip Logic ─────────────────────────────────
+    // ── Silence Skip Logic (always runs at full rAF rate) ─────────────
     if (
       silenceSkipRef.current &&
       seg &&
       (seg.segment_type === 'silence' || seg.segment_type === 'user-deleted')
     ) {
-      // Debounce: only jump if we haven't jumped to this segment's end recently
       if (lastJumpRef.current !== seg.end) {
         lastJumpRef.current = seg.end;
-        // Jump to segment end — if there's a keep segment after, land at its start
         const nextKeep = findNextKeepSegment(seg.start, edlRef.current);
         const jumpTarget = nextKeep ? nextKeep.start : seg.end;
         video.currentTime = jumpTarget;
       }
     } else {
-      // Reset debounce when we're in a valid segment
       if (seg && seg.segment_type === 'keep') {
         lastJumpRef.current = -1;
+      }
+    }
+
+    // ── Throttled React state updates (~15fps, every 4th frame) ────────
+    // Only update React state when something meaningfully changed.
+    const timeChanged = Math.abs(t - lastReactTimeRef.current) > 0.02;
+    const segChanged = seg?.id !== lastActiveSegRef.current?.id;
+
+    if (frameCountRef.current % 4 === 0 || segChanged) {
+      if (timeChanged || segChanged) {
+        lastReactTimeRef.current = t;
+        lastActiveSegRef.current = seg;
+        setCurrentTime(t);
+        onTimeUpdateRef.current(t);
+        setActiveSegment(seg);
       }
     }
 

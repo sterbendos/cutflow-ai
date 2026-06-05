@@ -19,7 +19,7 @@ import { invoke } from '@tauri-apps/api/core';
 // ─────────────────────────────────────────────────────────────
 
 export type SegmentType = 'keep' | 'silence' | 'user-deleted';
-export type TransitionType = 'none' | 'crossfade' | 'dip_black' | 'wipe';
+export type TransitionType = 'none' | 'crossfade' | 'dip_black' | 'wipe' | 'flash' | 'zoom';
 export type AspectRatio = '16:9' | '9:16' | '1:1' | '4:3' | '21:9';
 
 export interface EdlSegment {
@@ -64,7 +64,8 @@ type TimelineAction =
   | { type: 'SET_TRANSITION'; payload: { type: TransitionType; duration: number } }
   | { type: 'ADD_AUDIO_SEGMENT'; payload: AudioSegment }
   | { type: 'REMOVE_AUDIO_SEGMENT'; payload: string }
-  | { type: 'SET_ASPECT_RATIO'; payload: AspectRatio };
+  | { type: 'SET_ASPECT_RATIO'; payload: AspectRatio }
+  | { type: 'SET_TRANSCRIPT_JSON'; payload: { text: string; start: number; end: number }[] };
 
 const initialState: TimelineState = {
   source_video_path: '',
@@ -135,6 +136,9 @@ function timelineReducer(
     case 'SET_ASPECT_RATIO':
       return { ...state, aspectRatio: action.payload };
 
+    case 'SET_TRANSCRIPT_JSON':
+      return { ...state, transcript_json: action.payload };
+
     default:
       return state;
   }
@@ -145,6 +149,7 @@ function timelineReducer(
 // ─────────────────────────────────────────────────────────────
 
 import { useWhisper, TranscriptWord } from '../hooks/useWhisper';
+import type { TranscriptStatus } from '../hooks/useWhisper';
 
 interface TimelineContextValue {
   state: TimelineState;
@@ -165,7 +170,10 @@ interface TimelineContextValue {
   setAspectRatio: (ratio: AspectRatio) => void;
   language: string;
   setLanguage: (lang: string) => void;
-  retranscribe: () => void;
+  retranscribe: (langOverride?: string) => void;
+  transcriptStatus: TranscriptStatus;
+  transcriptError: string | null;
+  transcriptProgress: number;
   undo: () => void;
   redo: () => void;
   canUndo: boolean;
@@ -181,7 +189,8 @@ const TimelineContext = createContext<TimelineContextValue | null>(null);
 export function TimelineProvider({ children }: { children: React.ReactNode }) {
   const [state, dispatch] = useReducer(timelineReducer, initialState);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
-  const { transcript, isTranscribing, transcribeVideo, language, setLanguage } = useWhisper();
+  const { transcript, isTranscribing, transcribeVideo, language, setLanguage,
+          transcriptStatus, transcriptError, transcriptProgress } = useWhisper();
   
   // History Stack
   const [past, setPast] = useState<TimelineState[]>([]);
@@ -224,9 +233,13 @@ export function TimelineProvider({ children }: { children: React.ReactNode }) {
     return () => { unlisten?.(); };
   }, []);
 
-  // ── Sync transcript to Axum backend (for MCP access) ──
+  // ── Sync transcript to Axum backend (for MCP access) and into local state ──
   useEffect(() => {
     if (transcript.length === 0) return;
+    // Write into the reducer so ExportDialog (and any other consumer) gets
+    // real word-level timestamps for SRT generation.
+    dispatch({ type: 'SET_TRANSCRIPT_JSON', payload: transcript });
+    // Also push to the Axum REST server so the MCP agent can read it.
     fetch('http://127.0.0.1:14220/api/timeline/transcript', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -385,11 +398,15 @@ export function TimelineProvider({ children }: { children: React.ReactNode }) {
     dispatch({ type: 'SET_ASPECT_RATIO', payload: ratio });
   }, []);
 
-  const retranscribe = useCallback(() => {
-    if (state.source_video_path) {
-      transcribeVideo(state.source_video_path, language || undefined);
+  const retranscribe = useCallback((langOverride?: string) => {
+    // Always read from stateRef so we get the latest path even if called
+    // from an old closure. Language is handled internally by useWhisper's ref,
+    // but we can pass an explicit override if we want an immediate re-run.
+    const path = stateRef.current.source_video_path;
+    if (path) {
+      transcribeVideo(path, langOverride !== undefined ? langOverride : (language || undefined));
     }
-  }, [state.source_video_path, transcribeVideo, language]);
+  }, [transcribeVideo, language]);
 
   const undo = useCallback(() => {
     if (past.length === 0) return;
@@ -429,6 +446,9 @@ export function TimelineProvider({ children }: { children: React.ReactNode }) {
         language,
         setLanguage,
         retranscribe,
+        transcriptStatus,
+        transcriptError,
+        transcriptProgress,
         undo,
         redo,
         canUndo: past.length > 0,

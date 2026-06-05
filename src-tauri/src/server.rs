@@ -573,6 +573,18 @@ fn handle_mcp_message(body: Value, state: SharedState) -> Value {
                                 },
                                 "required": ["output_path"]
                             }
+                        },
+                        {
+                            "name": "set_transition",
+                            "description": "Set the visual transition effect applied between cuts (e.g. flash, zoom, dip_black).",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "type": { "type": "string", "enum": ["none", "crossfade", "dip_black", "wipe", "flash", "zoom"] },
+                                    "duration": { "type": "number", "description": "Duration of the effect in seconds" }
+                                },
+                                "required": ["type", "duration"]
+                            }
                         }
                     ]
                 }
@@ -791,6 +803,22 @@ fn execute_mcp_tool(name: &str, args: Value, state: &SharedState) -> Value {
                 "message": format!("Export queued to: {}. Export runs via ffmpeg sidecar in the desktop app.", output_path),
                 "note": "Run from UI or Tauri IPC for actual ffmpeg execution"
             })
+        }
+        "set_transition" => {
+            let t_type = args
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("none")
+                .to_string();
+            let duration = args.get("duration").and_then(|v| v.as_f64()).unwrap_or(0.3);
+            match state.write() {
+                Ok(mut write) => {
+                    write.transitionType = t_type.clone();
+                    write.transitionDuration = duration;
+                    json!({ "success": true, "message": format!("Transition set to {} ({:.1}s)", t_type, duration) })
+                }
+                Err(e) => json!({ "success": false, "message": format!("Lock error: {e}") }),
+            }
         }
         _ => {
             json!({ "error": format!("Unknown tool: {name}") })

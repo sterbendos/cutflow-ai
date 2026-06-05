@@ -38,57 +38,119 @@ function getSegmentTitle(seg: EdlSegment): string {
 export default function Timeline() {
   const { state, markSegment, splitSegment, removeAudioSegment } = useTimeline();
   const railRef = useRef<HTMLDivElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
   const [isDraggingPlayhead, setIsDraggingPlayhead] = useState(false);
   const [localTime, setLocalTime] = useState(0);
   const [zoomLevel, setZoomLevel] = useState(1);
+  const [hideCuts, setHideCuts] = useState(true); // Default to streamlined
+  // Track display time in a ref for DOM-only playhead updates (avoids re-renders)
+  const displayTimeRef = useRef(0);
 
-  // ── Total duration derived from EDL ──────────────────────
-  const duration = useMemo(() => {
+  // ── Total duration derived from EDL ────────────────────────
+  const activeDuration = useMemo(() => {
     if (state.edl.length === 0) return 60;
+    if (hideCuts) {
+      return state.edl.filter(s => s.segment_type === 'keep').reduce((acc, s) => acc + (s.end - s.start), 0) || 1;
+    }
     return Math.max(...state.edl.map((s) => s.end));
-  }, [state.edl]);
+  }, [state.edl, hideCuts]);
 
-  // ── Display time: dragging overrides context time ─────────
-  const displayTime = isDraggingPlayhead ? localTime : state.current_time;
+  // ── Source <-> Visual Time Mapping ───────────────────────
+  const sourceToVisualTime = useCallback((t: number) => {
+    if (!hideCuts) return t;
+    let visualT = 0;
+    for (const seg of state.edl) {
+      if (seg.start > t) break;
+      if (seg.segment_type === 'keep') {
+        if (t <= seg.end) {
+          visualT += (t - seg.start);
+          break;
+        } else {
+          visualT += (seg.end - seg.start);
+        }
+      }
+    }
+    return visualT;
+  }, [state.edl, hideCuts]);
 
-  // ── Convert time → percentage ─────────────────────────────
+  const visualToSourceTime = useCallback((visualT: number) => {
+    if (!hideCuts) return visualT;
+    let acc = 0;
+    for (const seg of state.edl) {
+      if (seg.segment_type === 'keep') {
+        const dur = seg.end - seg.start;
+        if (acc + dur >= visualT) {
+          return seg.start + (visualT - acc);
+        }
+        acc += dur;
+      }
+    }
+    return state.edl.length > 0 ? state.edl[state.edl.length - 1].end : 0;
+  }, [state.edl, hideCuts]);
+
+  // ── Direct DOM playhead sync (no React re-render) ──────────────
+  // Writes --playhead-pct CSS var on the panel element so playhead
+  // moves without touching the React tree at all during playback.
+  const durationRef = useRef(activeDuration);
+  durationRef.current = activeDuration;
+
+  useEffect(() => {
+    const t = isDraggingPlayhead ? localTime : state.current_time;
+    displayTimeRef.current = t;
+    const visualT = sourceToVisualTime(t);
+    const pct = durationRef.current > 0 ? (visualT / durationRef.current) * 100 : 0;
+    const panel = panelRef.current;
+    if (panel) {
+      panel.style.setProperty('--playhead-pct', `${pct}%`);
+      // Update time readout directly
+      const readout = panel.querySelector<HTMLSpanElement>('.timeline-time-readout');
+      if (readout) {
+        readout.textContent = `${t.toFixed(3)}s / ${durationRef.current.toFixed(1)}s`;
+      }
+    }
+  });
+
+  // ── Convert source time → percentage ─────────────────────────────
   const timeToPct = useCallback(
-    (t: number) => Math.max(0, Math.min(100, (t / duration) * 100)),
-    [duration]
+    (t: number) => {
+      const visualT = sourceToVisualTime(t);
+      return Math.max(0, Math.min(100, (visualT / activeDuration) * 100));
+    },
+    [activeDuration, sourceToVisualTime]
   );
 
-  // ── Convert rail x-position → time ───────────────────────
+  // ── Convert rail x-position → source time ───────────────────────
   const xToTime = useCallback(
     (clientX: number): number => {
       const rail = railRef.current;
       if (!rail) return 0;
       const rect = rail.getBoundingClientRect();
       const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
-      return ratio * duration;
+      const visualT = ratio * activeDuration;
+      return visualToSourceTime(visualT);
     },
-    [duration]
+    [activeDuration, visualToSourceTime]
   );
 
   // ── Ruler ticks ───────────────────────────────────────────
   const rulerTicks = useMemo(() => {
     const ticks = [];
     for (let i = 0; i <= RULER_TICK_COUNT; i++) {
-      const t = (i / RULER_TICK_COUNT) * duration;
-      const pct = timeToPct(t);
-      ticks.push({ t, pct });
+      const visualT = (i / RULER_TICK_COUNT) * activeDuration;
+      const sourceT = visualToSourceTime(visualT);
+      const pct = (i / RULER_TICK_COUNT) * 100;
+      ticks.push({ t: sourceT, pct });
     }
     return ticks;
-  }, [duration, timeToPct]);
+  }, [activeDuration, visualToSourceTime]);
 
-  // ── Playhead drag ─────────────────────────────────────────
+  // ── Playhead drag ───────────────────────────────────────
   const handleRailMouseDown = useCallback(
     (e: React.MouseEvent) => {
       e.preventDefault();
       const t = xToTime(e.clientX);
       setLocalTime(t);
       setIsDraggingPlayhead(true);
-
-      // Seek the actual video element directly for low-latency feel
       const video = document.getElementById('main-video') as HTMLVideoElement | null;
       if (video) video.currentTime = t;
     },
@@ -154,6 +216,7 @@ export default function Timeline() {
 
   return (
     <footer
+      ref={panelRef}
       className="timeline-panel"
       id="timeline-panel"
       aria-label="Timeline editor"
@@ -180,18 +243,29 @@ export default function Timeline() {
           Timeline
         </span>
 
-        {/* Zoom Control */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-          <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>Zoom</span>
-          <input
-            type="range"
-            min="1"
-            max="20"
-            step="0.5"
-            value={zoomLevel}
-            onChange={(e) => setZoomLevel(parseFloat(e.target.value))}
-            style={{ width: 70, cursor: 'pointer' }}
-          />
+        {/* View Controls */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 10, color: 'var(--text-muted)', cursor: 'pointer' }}>
+            <input 
+              type="checkbox" 
+              checked={hideCuts} 
+              onChange={e => setHideCuts(e.target.checked)} 
+              style={{ accentColor: 'var(--teal-primary)' }} 
+            />
+            Hide Cuts
+          </label>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>Zoom</span>
+            <input
+              type="range"
+              min="1"
+              max="20"
+              step="0.5"
+              value={zoomLevel}
+              onChange={(e) => setZoomLevel(parseFloat(e.target.value))}
+              style={{ width: 70, cursor: 'pointer' }}
+            />
+          </div>
         </div>
 
         {/* Legend */}
@@ -203,6 +277,7 @@ export default function Timeline() {
 
         {/* Current time readout */}
         <span
+          className="timeline-time-readout"
           style={{
             fontSize: 11,
             color: 'var(--teal-primary)',
@@ -211,7 +286,7 @@ export default function Timeline() {
           }}
           aria-live="polite"
         >
-          {displayTime.toFixed(3)}s / {duration.toFixed(1)}s
+          {state.current_time.toFixed(3)}s / {activeDuration.toFixed(1)}s
         </span>
       </div>
 
@@ -251,17 +326,19 @@ export default function Timeline() {
                 role="slider"
                 aria-label="Video timeline"
                 aria-valuemin={0}
-                aria-valuemax={Math.round(duration)}
-                aria-valuenow={Math.round(displayTime)}
+                aria-valuemax={Math.round(activeDuration)}
+                aria-valuenow={Math.round(displayTimeRef.current)}
                 onMouseDown={handleRailMouseDown}
                 style={{ cursor: 'crosshair', userSelect: 'none' }}
               >
                 {/* Segment blocks */}
                 {state.edl.map((seg) => {
+                  if (hideCuts && seg.segment_type !== 'keep') return null;
+
                   const leftPct = timeToPct(seg.start);
                   const widthPct = timeToPct(seg.end) - leftPct;
                   const widthPx = (widthPct / 100) * (railRef.current?.offsetWidth ?? 800);
-                  if (widthPx < MIN_SEGMENT_WIDTH_PX) return null;
+                  if (widthPx < MIN_SEGMENT_WIDTH_PX && !hideCuts) return null;
 
                   return (
                     <div
@@ -286,11 +363,11 @@ export default function Timeline() {
                   );
                 })}
 
-                {/* Playhead */}
+                {/* Playhead — positioned by CSS var, updated via DOM (no React re-render) */}
                 <div
                   className="timeline-playhead"
                   id="timeline-playhead"
-                  style={{ left: `${timeToPct(displayTime)}%` }}
+                  style={{ left: 'var(--playhead-pct, 0%)' }}
                   aria-hidden="true"
                 />
               </div>
@@ -308,6 +385,7 @@ export default function Timeline() {
                 aria-label="Audio timeline (mirrors video)"
               >
                 {state.edl.map((seg) => {
+                  if (hideCuts && seg.segment_type !== 'keep') return null;
                   const leftPct = timeToPct(seg.start);
                   const widthPct = timeToPct(seg.end) - leftPct;
                   return (
@@ -327,7 +405,7 @@ export default function Timeline() {
                 })}
                 <div
                   className="timeline-playhead"
-                  style={{ left: `${timeToPct(displayTime)}%`, opacity: 0.5 }}
+                  style={{ left: 'var(--playhead-pct, 0%)', opacity: 0.5 }}
                   aria-hidden="true"
                 />
               </div>
@@ -379,7 +457,7 @@ export default function Timeline() {
                 })}
                 <div
                   className="timeline-playhead"
-                  style={{ left: `${timeToPct(displayTime)}%`, opacity: 0.5 }}
+                  style={{ left: 'var(--playhead-pct, 0%)', opacity: 0.5 }}
                   aria-hidden="true"
                 />
               </div>

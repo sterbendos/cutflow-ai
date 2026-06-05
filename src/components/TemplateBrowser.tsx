@@ -10,11 +10,11 @@ import {
   getTemplatesByCategory,
   getAllCategories,
 } from '@/templates/motion-graphics';
-import { motion, AnimatePresence } from 'framer-motion';
+import { motion, type Variants } from 'framer-motion';
 
 // ─── Animation Variants ────────────────────────────────────────
 
-const containerVariants = {
+const containerVariants: Variants = {
   hidden: { opacity: 0 },
   visible: {
     opacity: 1,
@@ -22,13 +22,13 @@ const containerVariants = {
   }
 };
 
-const itemVariants = {
+const itemVariants: Variants = {
   hidden: { opacity: 0, scale: 0.95, y: 10 },
   visible: { 
     opacity: 1, 
     scale: 1, 
     y: 0,
-    transition: { type: 'spring', damping: 20, stiffness: 150 }
+    transition: { type: 'spring' as const, damping: 20, stiffness: 150 }
   }
 };
 

@@ -35,7 +35,13 @@ export default function LanguageSelector() {
       </svg>
       <select
         value={language}
-        onChange={(e) => setLanguage(e.target.value)}
+        onChange={(e) => {
+          const newLang = e.target.value;
+          setLanguage(newLang);
+          if (state.source_video_path) {
+            retranscribe(newLang);
+          }
+        }}
         style={{
           flex: 1,
           padding: '3px 6px',
@@ -52,24 +58,6 @@ export default function LanguageSelector() {
           </option>
         ))}
       </select>
-      {state.source_video_path && (
-        <button
-          onClick={retranscribe}
-          title="Re-transcribe with selected language"
-          style={{
-            padding: '3px 8px',
-            fontSize: 11,
-            background: 'var(--teal-primary)',
-            color: '#fff',
-            border: 'none',
-            borderRadius: 'var(--radius-sm)',
-            cursor: 'pointer',
-            whiteSpace: 'nowrap',
-          }}
-        >
-          Re-transcribe
-        </button>
-      )}
     </div>
   );
 }

@@ -99,6 +99,16 @@ pub fn normalize_windows_path(raw: &str) -> String {
     }
 }
 
+fn escape_ffmpeg_subtitle_filename(raw: &str) -> String {
+    normalize_windows_path(raw)
+        .replace('\'', "\\'")
+        .replace(':', "\\:")
+}
+
+fn escape_ffmpeg_filter_text(raw: &str) -> String {
+    raw.replace('\\', "\\\\").replace('\'', "\\'")
+}
+
 // ─────────────────────────────────────────────────────────────
 // Tauri Command: get_timeline_state
 // ─────────────────────────────────────────────────────────────
@@ -183,7 +193,7 @@ fn update_segment(
 #[tauri::command]
 fn split_segment(app: AppHandle, segment_id: String, split_time: f64) -> Result<TimelineState, String> {
     let mut state = TIMELINE_STATE.write().map_err(|e| format!("Lock poisoned: {e}"))?;
-    
+
     let mut new_edl = Vec::new();
     for seg in &state.edl {
         if seg.id == segment_id && split_time > seg.start && split_time < seg.end {
@@ -203,9 +213,9 @@ fn split_segment(app: AppHandle, segment_id: String, split_time: f64) -> Result<
             new_edl.push(seg.clone());
         }
     }
-    
+
     state.edl = new_edl;
-    
+
     let snapshot = state.clone();
     app.emit("timeline-external-update", &snapshot).map_err(|e| format!("Emit failed: {e}"))?;
     Ok(snapshot)
@@ -231,7 +241,7 @@ fn toggle_silence_skip(app: AppHandle) -> Result<TimelineState, String> {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Tauri Command: generate_ffmpeg_command
+// Tauri Command: generate_concat_args
 //
 // Builds a Windows-native ffmpeg.exe command string from the active EDL.
 // Only "keep" segments are included in the filtergraph.
@@ -243,7 +253,9 @@ fn toggle_silence_skip(app: AppHandle) -> Result<TimelineState, String> {
 // ─────────────────────────────────────────────────────────────
 
 #[tauri::command]
-fn generate_ffmpeg_command(output_path: String) -> Result<String, String> {
+fn generate_concat_args(
+    output_path: String,
+) -> Result<String, String> {
     let state = TIMELINE_STATE
         .read()
         .map_err(|e| format!("Lock poisoned: {e}"))?;
@@ -267,11 +279,11 @@ fn generate_ffmpeg_command(output_path: String) -> Result<String, String> {
     // Since xfade requires distinct inputs, implementing it purely with select is hard.
     // Given timeline constraints, we will keep the standard export unless a transition is requested.
     // Note: implementing true xfade here would require splitting the input into multiple streams.
-    
+
     // We will use trim/atrim and concat instead of select/aselect to fix VFR sync issues.
     let mut filtergraph = String::new();
     let mut concat_inputs = String::new();
-    
+
     for (i, seg) in keep_segments.iter().enumerate() {
         let v_out = format!("[v{}]", i);
         let a_out = format!("[a{}]", i);
@@ -283,24 +295,14 @@ fn generate_ffmpeg_command(output_path: String) -> Result<String, String> {
         ));
         concat_inputs.push_str(&format!("{}{}", v_out, a_out));
     }
-    
+
     let n = keep_segments.len();
     filtergraph.push_str(&format!("{}concat=n={}:v=1:a=1[v_cut][a_cut]", concat_inputs, n));
-
-    let srt_path = std::env::temp_dir().join("cutflow_export_subs.srt");
-    let mut v_final = "[v_cut]";
-
-    // Assumes subtitles are written to cutflow_export_subs.srt by JS before export
-    if std::fs::metadata(&srt_path).is_ok() {
-        let escaped_srt = srt_path.to_string_lossy().replace('\\', "\\\\").replace(':', "\\:");
-        filtergraph.push_str(&format!(";[v_cut]subtitles='{}'[v_sub]", escaped_srt));
-        v_final = "[v_sub]";
-    }
 
     let normalized_input = normalize_windows_path(&state.source_video_path);
     let normalized_output = normalize_windows_path(&output_path);
 
-    // Provide the arguments to the sidecar, not the full command string
+    // Pass 1 args: trim+concat only, no subtitles in filter_complex
     let args = serde_json::json!([
         "-y",
         "-i",
@@ -308,7 +310,7 @@ fn generate_ffmpeg_command(output_path: String) -> Result<String, String> {
         "-filter_complex",
         filtergraph,
         "-map",
-        v_final,
+        "[v_cut]",
         "-map",
         "[a_cut]",
         "-c:v",
@@ -335,26 +337,98 @@ fn generate_ffmpeg_command(output_path: String) -> Result<String, String> {
 // ─────────────────────────────────────────────────────────────
 
 #[tauri::command]
-async fn execute_export(app: AppHandle, output_path: String) -> Result<String, String> {
-    let args_json = generate_ffmpeg_command(output_path)?;
+async fn execute_export(
+    app: AppHandle,
+    output_path: String,
+    srt_path: Option<String>,
+    subtitle_style: Option<String>,
+) -> Result<String, String> {
+    // ── Pass 1: trim + concat ──────────────────────────────────────────────
+    // We always write pass-1 output to a temp file so we can do a clean
+    // subtitle burn-in as a separate, simple -vf call (no filter_complex
+    // path-escaping nightmares on Windows).
+    let needs_subtitles = srt_path.as_ref().map_or(false, |p| std::fs::metadata(p).is_ok());
+
+    let pass1_path = if needs_subtitles {
+        // Write to a temp file; pass 2 will burn subs onto it → final output
+        let tmp = std::env::temp_dir().join("cutflow_pass1.mp4");
+        tmp.to_string_lossy().to_string()
+    } else {
+        output_path.clone()
+    };
+
+    let args_json = generate_concat_args(pass1_path.clone())?;
     let args: Vec<String> = serde_json::from_str(&args_json).unwrap();
 
-    let output = app.shell().sidecar("ffmpeg")
-        .map_err(|e| format!("Failed to create sidecar command: {e}"))?
+    let out1 = app.shell().sidecar("ffmpeg")
+        .map_err(|e| format!("FFmpeg sidecar error: {e}"))?
         .args(args)
         .output()
         .await
-        .map_err(|e| format!("Failed to spawn ffmpeg sidecar: {e}"))?;
+        .map_err(|e| format!("FFmpeg pass-1 spawn failed: {e}"))?;
 
-    if output.status.success() {
-        let msg = "Export completed successfully.".to_string();
-        app.emit("export-complete", &msg)
-            .map_err(|e| format!("Emit failed: {e}"))?;
-        Ok(msg)
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        Err(format!("ffmpeg failed:\n{stderr}"))
+    if !out1.status.success() {
+        let stderr = String::from_utf8_lossy(&out1.stderr).to_string();
+        return Err(format!("FFmpeg pass-1 (concat) failed:\n{stderr}"));
     }
+
+    // ── Pass 2: subtitle burn-in (only if SRT provided) ───────────────────
+    if needs_subtitles {
+        let srt = srt_path.unwrap();
+
+        // Build the subtitle filter value
+        // FFmpeg -vf subtitles= on Windows: use forward slashes, escape colon
+        let srt_forward = srt.replace('\\', "/");
+        // Escape the colon after drive letter: C:/... → C\:/...
+        let srt_escaped = if srt_forward.len() > 1 && &srt_forward[1..2] == ":" {
+            format!("{}\\:{}", &srt_forward[..1], &srt_forward[2..])
+        } else {
+            srt_forward.clone()
+        };
+
+        let mut vf = format!("subtitles='{}'", srt_escaped);
+        if let Some(ref style) = subtitle_style {
+            let style_trimmed = style.trim();
+            if !style_trimmed.is_empty() {
+                vf.push_str(&format!(":force_style='{}'", style_trimmed.replace('\'', "\\'")));
+            }
+        }
+
+        let normalized_pass1 = normalize_windows_path(&pass1_path);
+        let normalized_out   = normalize_windows_path(&output_path);
+
+        let pass2_args: Vec<String> = vec![
+            "-y".into(),
+            "-i".into(), normalized_pass1,
+            "-vf".into(), vf,
+            "-c:v".into(), "libx264".into(),
+            "-preset".into(), "fast".into(),
+            "-crf".into(), "18".into(),
+            "-c:a".into(), "copy".into(),
+            "-movflags".into(), "+faststart".into(),
+            normalized_out,
+        ];
+
+        let out2 = app.shell().sidecar("ffmpeg")
+            .map_err(|e| format!("FFmpeg sidecar error: {e}"))?
+            .args(pass2_args)
+            .output()
+            .await
+            .map_err(|e| format!("FFmpeg pass-2 spawn failed: {e}"))?;
+
+        // Clean up temp file regardless
+        let _ = std::fs::remove_file(&pass1_path);
+
+        if !out2.status.success() {
+            let stderr = String::from_utf8_lossy(&out2.stderr).to_string();
+            return Err(format!("FFmpeg pass-2 (subtitles) failed:\n{stderr}"));
+        }
+    }
+
+    let msg = "Export completed successfully.".to_string();
+    app.emit("export-complete", &msg)
+        .map_err(|e| format!("Emit failed: {e}"))?;
+    Ok(msg)
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -368,7 +442,7 @@ async fn analyze_video(app: AppHandle, sensitivity: String) -> Result<TimelineSt
         let state_read = TIMELINE_STATE
             .read()
             .map_err(|e| format!("Lock poisoned: {e}"))?;
-        
+
         let path = state_read.source_video_path.clone();
         let dur = state_read.edl.iter().map(|s| s.end).fold(0.0, f64::max);
         (path, dur)
@@ -397,9 +471,9 @@ async fn analyze_video(app: AppHandle, sensitivity: String) -> Result<TimelineSt
         .map_err(|e| format!("Failed to run ffmpeg silencedetect: {e}"))?;
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    
+
     // Parse silence_start and silence_end from stderr
-    // Lines look like: 
+    // Lines look like:
     // [silencedetect @ 00000] silence_start: 12.34
     // [silencedetect @ 00000] silence_end: 14.56 | silence_duration: 2.22
 
@@ -440,7 +514,7 @@ async fn analyze_video(app: AppHandle, sensitivity: String) -> Result<TimelineSt
                 segment_type: "keep".to_string(),
             });
         }
-        
+
         // Add the silence segment
         edl.push(EdlSegment {
             id: uuid::Uuid::new_v4().to_string(),
@@ -454,27 +528,27 @@ async fn analyze_video(app: AppHandle, sensitivity: String) -> Result<TimelineSt
 
     // Add trailing keep segment if needed
     if current_time < duration {
-         edl.push(EdlSegment {
-             id: uuid::Uuid::new_v4().to_string(),
-             start: current_time,
-             end: duration,
-             segment_type: "keep".to_string(),
-         });
+        edl.push(EdlSegment {
+            id: uuid::Uuid::new_v4().to_string(),
+            start: current_time,
+            end: duration,
+            segment_type: "keep".to_string(),
+        });
     }
 
     if edl.is_empty() {
         edl = vec![EdlSegment {
-             id: uuid::Uuid::new_v4().to_string(),
-             start: 0.0,
-             end: duration,
-             segment_type: "keep".to_string(),
-         }];
+            id: uuid::Uuid::new_v4().to_string(),
+            start: 0.0,
+            end: duration,
+            segment_type: "keep".to_string(),
+        }];
     }
 
     let mut state_write = TIMELINE_STATE
         .write()
         .map_err(|e| format!("Lock poisoned: {e}"))?;
-        
+
     state_write.edl = edl;
     let snapshot = state_write.clone();
     drop(state_write);
@@ -550,7 +624,7 @@ pub fn run() {
             update_segment,
             split_segment,
             toggle_silence_skip,
-            generate_ffmpeg_command,
+            generate_concat_args,
             execute_export,
             analyze_video,
             extract_audio_for_transcription,

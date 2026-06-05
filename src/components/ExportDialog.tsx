@@ -1,10 +1,12 @@
 // CutFlow AI — Export Dialog
 // Modal for choosing export format, resolution, quality, and subtitle options.
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useMemo } from 'react';
 import { useTimeline } from '@/context/TimelineContext';
 import { generateFcpxml, type ExportClip } from '@/lib/export/fcpxml';
 import { generateEdl } from '@/lib/export/edl';
+import { generateSrtForExport, normalizeTranscript } from '@/lib/export/subtitles';
+import { scanFacesForExport } from '@/lib/export/faceScanner';
 import { motion, AnimatePresence } from 'framer-motion';
 
 interface ExportDialogProps {
@@ -17,20 +19,29 @@ type ExportQuality = 'high' | 'medium' | 'low';
 type ExportResolution = 'source' | '2160' | '1080' | '720';
 
 export default function ExportDialog({ open, onClose }: ExportDialogProps) {
-  const { state } = useTimeline();
+  const { state, transcript } = useTimeline();
   const [format, setFormat] = useState<ExportFormat>('mp4');
   const [quality, setQuality] = useState<ExportQuality>('high');
   const [resolution, setResolution] = useState<ExportResolution>('source');
   const [includeSubtitles, setIncludeSubtitles] = useState(true);
+  const [useGpu, setUseGpu] = useState(true);
+  const [subtitleTemplate, setSubtitleTemplate] = useState('MarginV=70,Fontsize=24,Outline=1,Shadow=1');
   const [exporting, setExporting] = useState(false);
-  const [exportStatus, setExportStatus] = useState<'idle' | 'success' | 'error'>('idle');
+  const [exportStatus, setExportStatus] = useState<'idle' | 'scanning' | 'success' | 'error'>('idle');
   const [statusMessage, setStatusMessage] = useState('');
+  const [scanProgress, setScanProgress] = useState(0);
+  const [errorDetail, setErrorDetail] = useState('');
+
+  const subtitleWords = useMemo(() => {
+    return transcript.length > 0 ? normalizeTranscript(transcript) : normalizeTranscript(state.transcript_json);
+  }, [transcript, state.transcript_json]);
 
   const doExport = useCallback(async () => {
     if (!state.source_video_path) return;
     setExporting(true);
     setExportStatus('idle');
     setStatusMessage('');
+    setErrorDetail('');
 
     try {
       if (format === 'mp4') {
@@ -46,40 +57,46 @@ export default function ExportDialog({ open, onClose }: ExportDialogProps) {
           return;
         }
 
+        let srtPath: string | null = null;
+
         // Generate SRT if subtitles enabled
         if (includeSubtitles && state.edl.length > 0) {
-          try {
-            const { writeTextFile } = await import('@tauri-apps/plugin-fs');
-            const { tempDir } = await import('@tauri-apps/api/path');
-            const tmp = await tempDir();
-            const srtPath = `${tmp}cutflow_export_subs.srt`;
-
-            const words = state.edl.map((seg) => ({
-              text: seg.segment_type === 'keep' ? 'keep' : 'cut',
-              start: seg.start,
-              end: seg.end,
-            }));
-
-            let srtContent = '';
-            words.forEach((_, i) => {
-              if (i % 5 !== 0) return;
-              const chunk = words.slice(i, i + 5);
-              const s = chunk[0].start;
-              const e = chunk[chunk.length - 1].end + 0.5;
-              srtContent += `${Math.floor(i / 5) + 1}\n`;
-              srtContent += `${fmtSrt(s)} --> ${fmtSrt(e)}\n`;
-              srtContent += `${chunk.map((c) => c.text).join(' ')}\n\n`;
-            });
-
-            await writeTextFile(srtPath, srtContent);
-          } catch (err) {
-            console.error('SRT export error:', err);
+          if (subtitleWords.length === 0) {
+            throw new Error('No subtitles available to burn in. Wait for transcription to finish, or disable subtitles for this export.');
           }
+
+          setExportStatus('scanning');
+          setStatusMessage('Analyzing face positions...');
+          setScanProgress(0);
+
+          const facePlacements = await scanFacesForExport(
+            state.source_video_path,
+            subtitleWords,
+            (progress) => setScanProgress(progress)
+          );
+
+          setStatusMessage('Generating subtitles...');
+
+          const srtContent = generateSrtForExport(subtitleWords, state.edl, facePlacements);
+
+          if (!srtContent.trim()) {
+            throw new Error('No subtitles available to burn in. Wait for transcription to finish, or disable subtitles for this export.');
+          }
+
+          const { writeTextFile } = await import('@tauri-apps/plugin-fs');
+          const { tempDir, join } = await import('@tauri-apps/api/path');
+          const tmp = await tempDir();
+          srtPath = await join(tmp, 'cutflow_export_subs.srt');
+          await writeTextFile(srtPath, srtContent);
         }
 
         // Invoke Rust export command
         const { invoke } = await import('@tauri-apps/api/core');
-        await invoke('execute_export', { outputPath });
+        await invoke('execute_export', { 
+          outputPath,
+          srtPath,
+          subtitleStyle: includeSubtitles ? subtitleTemplate : null
+        });
         setExportStatus('success');
         setStatusMessage('Export completed successfully');
 
@@ -88,6 +105,7 @@ export default function ExportDialog({ open, onClose }: ExportDialogProps) {
           onClose();
           setExportStatus('idle');
           setStatusMessage('');
+          setScanProgress(0);
         }, 3000);
       } else {
         // XML / EDL export — write file via save dialog
@@ -138,17 +156,15 @@ export default function ExportDialog({ open, onClose }: ExportDialogProps) {
         }, 3000);
       }
     } catch (err: any) {
-      console.error('Export failed:', err);
+      const msg: string = err?.message || String(err) || 'Export failed';
+      console.error('Export failed:', msg);
       setExportStatus('error');
-      setStatusMessage(err?.message || 'Export failed');
-      setTimeout(() => {
-        setExportStatus('idle');
-        setStatusMessage('');
-      }, 4000);
+      setStatusMessage('Export failed — see details below');
+      setErrorDetail(msg);
     } finally {
       setExporting(false);
     }
-  }, [state.source_video_path, state.edl, state.transitionType, state.transitionDuration, format, quality, resolution, includeSubtitles, onClose]);
+  }, [state.source_video_path, state.edl, state.transitionType, state.transitionDuration, subtitleWords, format, quality, resolution, includeSubtitles, useGpu, subtitleTemplate, onClose]);
 
   const hasVideo = Boolean(state.source_video_path);
 
@@ -280,7 +296,57 @@ export default function ExportDialog({ open, onClose }: ExportDialogProps) {
                 onChange={(e) => setIncludeSubtitles(e.target.checked)}
                 style={{ accentColor: 'var(--teal-primary)' }}
               />
-              Include subtitle file (.srt)
+              Include subtitles
+            </label>
+            
+            {includeSubtitles && (
+              <div style={{ marginBottom: 16 }}>
+                <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', display: 'block', marginBottom: 6 }}>Subtitle Template</label>
+                <select
+                  value={subtitleTemplate}
+                  onChange={(e) => setSubtitleTemplate(e.target.value)}
+                  style={{
+                    width: '100%',
+                    padding: '8px',
+                    fontSize: 11,
+                    background: 'var(--surface)',
+                    color: 'var(--text)',
+                    border: '1px solid var(--border)',
+                    borderRadius: 'var(--radius-sm)',
+                    boxSizing: 'border-box'
+                  }}
+                >
+                  <option value="MarginV=70,Fontsize=24,Outline=1,Shadow=1,PrimaryColour=&H00FFFFFF">Standard White</option>
+                  <option value="MarginV=120,Fontsize=32,Outline=2,Shadow=0,PrimaryColour=&H0000FFFF,BorderStyle=3,OutlineColour=&H00000000">TikTok Box</option>
+                  <option value="MarginV=50,Fontsize=20,Outline=0,Shadow=2,PrimaryColour=&H00CCCCCC,Fontname=Courier New">Cinematic Minimal</option>
+                  <option value="MarginV=90,Fontsize=28,Outline=3,Shadow=2,PrimaryColour=&H0000FF00,OutlineColour=&H00000000,Fontname=Impact">Gaming Green</option>
+                </select>
+              </div>
+            )}
+
+            {includeSubtitles && subtitleWords.length === 0 && (
+              <div style={{
+                marginBottom: 12,
+                padding: '8px 10px',
+                background: 'rgba(245,158,11,0.12)',
+                border: '1px solid rgba(245,158,11,0.4)',
+                borderRadius: 'var(--radius-sm)',
+                fontSize: 10,
+                color: '#f59e0b',
+                lineHeight: 1.5,
+              }}>
+                No transcript yet. Wait for Whisper to finish transcribing, or disable subtitles.
+              </div>
+            )}
+
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 11, color: 'var(--text)', marginBottom: 16, cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={useGpu}
+                onChange={(e) => setUseGpu(e.target.checked)}
+                style={{ accentColor: 'var(--teal-primary)' }}
+              />
+              Use NVIDIA GPU Acceleration (NVENC)
             </label>
           </>
         )}
@@ -326,7 +392,7 @@ export default function ExportDialog({ open, onClose }: ExportDialogProps) {
                     <animateTransform attributeName="transform" type="rotate" from="0 12 12" to="360 12 12" dur="1s" repeatCount="indefinite"/>
                   </path>
                 </svg>
-                Exporting...
+                {exportStatus === 'scanning' ? `Scanning... ${Math.round(scanProgress)}%` : 'Exporting...'}
               </>
             ) : exportStatus === 'success' ? (
               <>✓ Exported</>
@@ -345,21 +411,42 @@ export default function ExportDialog({ open, onClose }: ExportDialogProps) {
         )}
 
         {statusMessage && (
-          <p style={{ fontSize: 10, color: exportStatus === 'error' ? '#dc2626' : 'var(--text-muted)', marginTop: 8, textAlign: 'center' }}>
+          <p style={{ fontSize: 10, color: exportStatus === 'error' ? '#dc2626' : '#059669', marginTop: 8, textAlign: 'center' }}>
             {statusMessage}
           </p>
-          )}
+        )}
+
+        {errorDetail && (
+          <div style={{
+            marginTop: 8,
+            background: 'rgba(220,38,38,0.08)',
+            border: '1px solid rgba(220,38,38,0.4)',
+            borderRadius: 'var(--radius-sm)',
+            padding: '8px 10px',
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+              <span style={{ fontSize: 10, fontWeight: 700, color: '#dc2626' }}>FFmpeg Error Log</span>
+              <button
+                onClick={() => { setErrorDetail(''); setExportStatus('idle'); setStatusMessage(''); }}
+                style={{ fontSize: 10, background: 'none', border: 'none', color: '#888', cursor: 'pointer' }}
+              >✕ Dismiss</button>
+            </div>
+            <pre style={{
+              fontSize: 9,
+              color: '#fca5a5',
+              whiteSpace: 'pre-wrap',
+              wordBreak: 'break-all',
+              maxHeight: 150,
+              overflowY: 'auto',
+              margin: 0,
+              fontFamily: 'monospace',
+            }}>{errorDetail}</pre>
+          </div>
+        )}
+
         </motion.div>
       </motion.div>
       )}
     </AnimatePresence>
   );
-}
-
-function fmtSrt(seconds: number): string {
-  const h = Math.floor(seconds / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
-  const s = Math.floor(seconds % 60);
-  const ms = Math.round((seconds % 1) * 1000);
-  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')},${String(ms).padStart(3, '0')}`;
 }

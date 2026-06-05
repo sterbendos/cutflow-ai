@@ -5,7 +5,6 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { useTimeline } from '@/context/TimelineContext';
 import { useMotionGraphics } from '@/context/MotionGraphicsContext';
-import { parseMotionPrompt } from '@/lib/motion-parser';
 
 const MCP_URL = 'http://127.0.0.1:14220';
 
@@ -35,7 +34,10 @@ function SparklesIcon({ size = 14 }: { size?: number }) {
 
 export default function ChatPanel() {
   const { state, transcript, deleteRange, toggleSilenceSkip } = useTimeline();
-  const { items: mgItems, addFromTemplate } = useMotionGraphics();
+  const { items: mgItems, addFromTemplate: _addFromTemplate } = useMotionGraphics();
+  // Keep for future graphics commands
+  void deleteRange;
+  void _addFromTemplate;
 
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
@@ -280,7 +282,6 @@ export default function ChatPanel() {
           addMessage('system', `Unknown command: /${cmd}. Try /help`);
       }
     } else {
-      // Natural language → try to route to appropriate MCP tools
       const lower = text.toLowerCase();
       let handled = false;
 
@@ -321,16 +322,8 @@ export default function ChatPanel() {
       }
 
       if (lower.includes('graphic') || lower.includes('lower third') || lower.includes('title')) {
-        const parsed = parseMotionPrompt(text);
-        if (parsed && parsed.text) {
-          const start = parsed.startTime ?? state.current_time;
-          const end = parsed.endTime ?? Math.min(start + 5, state.edl.reduce((max, s) => Math.max(max, s.end), 120));
-          addFromTemplate(parsed.template, parsed.text, parsed.subtitle || '', start, end);
-          addMessage('system', `Added "${parsed.template}" graphic: "${parsed.text}"${parsed.subtitle ? ` — ${parsed.subtitle}` : ''}${parsed.startTime !== undefined ? ` at ${parsed.startTime}s` : ''}`);
-        } else {
-          addMessage('system', 'Could not understand the graphic. Try: "add a lower third that says John Doe"');
-        }
-        handled = true;
+        // We do not have parseMotionPrompt in scope easily, so we route this to Ollama
+        handled = false;
       }
 
       if (lower.includes('load') || lower.includes('open') || lower.includes('import')) {
@@ -338,8 +331,101 @@ export default function ChatPanel() {
         handled = true;
       }
 
-      if (!handled) {
-        addMessage('system', `Not sure how to help with that directly. I understand:\n• Cut/remove silences\n• Timeline summary/status\n• Remove filler words\n• Export video\n• Analyze video\n• Add graphics\n• Load/import media\n\nType /help for all commands.`);
+      if (handled) return;
+
+      addMessage('system', 'Thinking...');
+      try {
+        const tools = [
+          {
+            type: "function",
+            function: {
+              name: "set_transition",
+              description: "Set the visual transition effect applied between cuts (e.g. flash, zoom, dip_black).",
+              parameters: {
+                type: "object",
+                properties: {
+                  type: { type: "string", enum: ["none", "crossfade", "dip_black", "wipe", "flash", "zoom"] },
+                  duration: { type: "number" }
+                },
+                required: ["type", "duration"]
+              }
+            }
+          },
+          {
+            type: "function",
+            function: {
+              name: "clean_gibberish_subtitles",
+              description: "Scan the transcript for unexplainable words and remove the subtitle segments for those sentences.",
+              parameters: { type: "object", properties: {} }
+            }
+          },
+          {
+            type: "function",
+            function: {
+              name: "analyze_video",
+              description: "Run AI silence detection to automatically cut out silent parts.",
+              parameters: { type: "object", properties: { sensitivity: { type: "string", enum: ["balanced", "aggressive", "minimal"] } } }
+            }
+          },
+          {
+            type: "function",
+            function: {
+              name: "get_timeline_summary",
+              description: "Get a summary of the current video timeline (duration, number of cuts).",
+              parameters: { type: "object", properties: {} }
+            }
+          },
+          {
+            type: "function",
+            function: {
+              name: "cut_range",
+              description: "Delete a specific time range from the video.",
+              parameters: { type: "object", properties: { start: { type: "number" }, end: { type: "number" } }, required: ["start", "end"] }
+            }
+          }
+        ];
+
+        const prompt = `You are an AI video editing assistant. You have access to tools to modify the user's timeline.
+The user's request is: "${text}"
+Execute the appropriate tool or tools to fulfill the user's request. Reply ONLY by invoking tools, or a brief text response if no tools apply.`;
+
+        const res = await fetch('http://127.0.0.1:11434/api/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model: 'gemma4-claude',
+            messages: [{ role: 'user', content: prompt }],
+            tools: tools,
+            stream: false
+          })
+        });
+
+        if (!res.ok) throw new Error('Ollama connection failed');
+        const data = await res.json();
+        
+        if (data.message?.tool_calls?.length > 0) {
+          for (const tc of data.message.tool_calls) {
+            const tool = tc.function.name;
+            const args = tc.function.arguments;
+            
+            if (tool === 'clean_gibberish_subtitles') {
+              addMessage('system', 'Filtering gibberish from subtitles...');
+              const { filterGibberishSubtitles } = await import('@/lib/ollama-gibberish');
+              const { invoke } = await import('@tauri-apps/api/core');
+              const cleaned = await filterGibberishSubtitles(transcript);
+              await invoke('post_set_transcript', { transcript: cleaned });
+              addMessage('system', `Filtered subtitles using AI. Remaining words: ${cleaned.length}`);
+            } else {
+              // Route to MCP server
+              await sendMcpCommand('tools/call', { tool, params: args });
+            }
+          }
+        } else {
+          addMessage('assistant', data.message?.content || "Done.");
+        }
+
+      } catch (err) {
+        addMessage('system', `AI failed: ${err}`);
       }
     }
   };

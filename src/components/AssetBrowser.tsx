@@ -4,7 +4,7 @@
 import { useState, useRef, useCallback, useMemo, useEffect } from 'react';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { useTimeline } from '@/context/TimelineContext';
-import { motion, AnimatePresence } from 'framer-motion';
+import { motion, type Variants } from 'framer-motion';
 
 // ─── Types ────────────────────────────────────────────────────
 
@@ -86,7 +86,7 @@ function probeDuration(filePath: string): Promise<number> {
 
 // ─── Animation Variants ────────────────────────────────────────
 
-const containerVariants = {
+const containerVariants: Variants = {
   hidden: { opacity: 0 },
   visible: {
     opacity: 1,
@@ -94,34 +94,35 @@ const containerVariants = {
   }
 };
 
-const itemVariants = {
+const itemVariants: Variants = {
   hidden: { opacity: 0, scale: 0.95, y: 10 },
   visible: { 
     opacity: 1, 
     scale: 1, 
     y: 0,
-    transition: { type: 'spring', damping: 20, stiffness: 150 }
+    transition: { type: 'spring' as const, damping: 20, stiffness: 150 }
   }
 };
+
+// ─── Module Level Cache ──────────────────────────────────────
+let globalAssetCache: MediaAsset[] = [];
+let globalActiveId: string | null = null;
 
 // ─── Main Component ──────────────────────────────────────────
 
 export default function AssetBrowser() {
   const { loadVideo, analyzeVideo } = useTimeline();
-  const [assets, setAssets] = useState<MediaAsset[]>([]);
-  const [activeId, setActiveId] = useState<string | null>(null);
+  const [assets, setAssets] = useState<MediaAsset[]>(globalAssetCache);
+  const [activeId, setActiveId] = useState<string | null>(globalActiveId);
   const [searchQuery, setSearchQuery] = useState('');
   const [sortMode, setSortMode] = useState<SortMode>('date');
   const [viewMode, setViewMode] = useState<ViewMode>('grid');
   const [dragOver, setDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Persist assets across tab switches
-  const assetCache = useRef<MediaAsset[]>([]);
-
   // ── Filtered + sorted assets ──
   const displayAssets = useMemo(() => {
-    let result = assetCache.current;
+    let result = assets;
 
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase();
@@ -135,12 +136,7 @@ export default function AssetBrowser() {
     }
 
     return result;
-  }, [searchQuery, sortMode]);
-
-  // Sync ref to state for reactivity
-  useEffect(() => {
-    setAssets(assetCache.current);
-  }, [displayAssets]);
+  }, [assets, searchQuery, sortMode]);
 
   // ── Add files ──
   const addFiles = useCallback(async (paths: string[]) => {
@@ -162,12 +158,13 @@ export default function AssetBrowser() {
       });
     }
 
-    assetCache.current = [...assetCache.current, ...newAssets];
-    setAssets([...assetCache.current]);
+    globalAssetCache = [...globalAssetCache, ...newAssets];
+    setAssets(globalAssetCache);
 
     // Auto-select first
     const first = newAssets[0];
     if (first) {
+      globalActiveId = first.id;
       setActiveId(first.id);
       await loadVideo(first.path, first.duration);
       await analyzeVideo('balanced');
@@ -176,6 +173,7 @@ export default function AssetBrowser() {
 
   // ── Select existing asset ──
   const selectAsset = useCallback(async (asset: MediaAsset) => {
+    globalActiveId = asset.id;
     setActiveId(asset.id);
     await loadVideo(asset.path, asset.duration);
   }, [loadVideo]);
@@ -220,11 +218,14 @@ export default function AssetBrowser() {
     await addFiles(paths);
   }, [addFiles]);
 
-  // ── Delete asset ──
+  // ── Delete ──
   const deleteAsset = useCallback((id: string) => {
-    assetCache.current = assetCache.current.filter(a => a.id !== id);
-    setAssets([...assetCache.current]);
-    if (activeId === id) setActiveId(null);
+    globalAssetCache = globalAssetCache.filter(a => a.id !== id);
+    setAssets(globalAssetCache);
+    if (activeId === id) {
+      globalActiveId = null;
+      setActiveId(null);
+    }
   }, [activeId]);
 
   return (
@@ -312,7 +313,7 @@ export default function AssetBrowser() {
         />
 
         {/* Empty state */}
-        {assets.length === 0 && !dragOver && (
+        {displayAssets.length === 0 && !dragOver && (
           <div
             onClick={openFilePicker}
             style={{
@@ -345,7 +346,7 @@ export default function AssetBrowser() {
             animate="visible"
             style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}
           >
-            {assets.map((asset) => (
+            {displayAssets.map((asset) => (
               <motion.div
                 key={asset.id}
                 variants={itemVariants}
@@ -445,7 +446,7 @@ export default function AssetBrowser() {
             animate="visible"
             style={{ display: 'flex', flexDirection: 'column', gap: 2 }}
           >
-            {assets.map((asset) => (
+            {displayAssets.map((asset) => (
               <motion.div
                 key={asset.id}
                 variants={itemVariants}

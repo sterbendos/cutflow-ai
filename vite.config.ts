@@ -7,8 +7,6 @@ import { fileURLToPath, URL } from "node:url";
 export default defineConfig({
   plugins: [react(), tailwindcss()],
 
-  // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
-  //
   // 1. prevent vite from obscuring rust errors
   clearScreen: false,
 
@@ -16,6 +14,13 @@ export default defineConfig({
   server: {
     port: 1420,
     strictPort: true,
+    // These headers enable SharedArrayBuffer which ONNX Runtime WASM requires for Whisper.
+    // Without COOP + COEP, WebView2 refuses to expose SharedArrayBuffer even with numThreads=1.
+    headers: {
+      "Cross-Origin-Opener-Policy": "same-origin",
+      "Cross-Origin-Embedder-Policy": "require-corp",
+      "Cross-Origin-Resource-Policy": "cross-origin",
+    },
     watch: {
       // 3. tell vite to ignore watching `src-tauri`
       ignored: ["**/src-tauri/**"],
@@ -27,4 +32,11 @@ export default defineConfig({
       "@": fileURLToPath(new URL("./src", import.meta.url)),
     },
   },
+
+  // onnxruntime-web ships pre-built WASM binaries and must not be re-bundled.
+  // Excluding it prevents Vite from trying to parse its WASM internals.
+  optimizeDeps: {
+    exclude: ["onnxruntime-web"],
+  },
 });
+

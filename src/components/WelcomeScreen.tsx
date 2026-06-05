@@ -1,5 +1,4 @@
-import { motion } from 'framer-motion';
-import { useRef } from 'react';
+import { motion, type Variants } from 'framer-motion';
 
 // Reusing the ScissorsIcon from Header
 function ScissorsIcon() {
@@ -14,9 +13,7 @@ function ScissorsIcon() {
 }
 
 export default function WelcomeScreen() {
-  const fileInputRef = useRef<HTMLInputElement>(null);
-
-  const containerVariants = {
+  const containerVariants: Variants = {
     hidden: { opacity: 0 },
     visible: { 
       opacity: 1,
@@ -27,12 +24,12 @@ export default function WelcomeScreen() {
     }
   };
 
-  const itemVariants = {
+  const itemVariants: Variants = {
     hidden: { opacity: 0, y: 20 },
     visible: { 
       opacity: 1, 
       y: 0,
-      transition: { type: 'spring', damping: 20, stiffness: 100 }
+      transition: { type: 'spring' as const, damping: 20, stiffness: 100 }
     }
   };
 

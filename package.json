@@ -19,6 +19,7 @@
     "@tauri-apps/plugin-shell": "^2.3.5",
     "clsx": "^2.1.1",
     "framer-motion": "^12.40.0",
+    "onnxruntime-web": "^1.26.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "tailwind-merge": "^3.6.0"
