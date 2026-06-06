@@ -49,8 +49,8 @@ export async function scanFacesForExport(
 
       if (type === 'ready') {
         workerReady = true;
-        // Start scanning once worker and video are both ready
-        if (video.readyState >= 2) processNextFrame();
+        // Start scanning once worker and video are both ready (readyState >= 1 means HAVE_METADATA)
+        if (video.readyState >= 1) processNextFrame();
         return;
       }
 

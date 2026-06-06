@@ -10,6 +10,8 @@ import SubtitleOverlay from './SubtitleOverlay';
 import MotionGraphicsOverlay from './MotionGraphicsOverlay';
 import AspectRatioSelector from './AspectRatioSelector';
 import { useFaceDetection } from '@/hooks/useFaceDetection';
+import { effectsToCssFilter } from './TransformInspector';
+import { useEffects } from '@/context/EffectsContext';
 
 // ─── Icon helpers ─────────────────────────────────────────────
 
@@ -91,7 +93,9 @@ function formatTime(secs: number): string {
 // ─────────────────────────────────────────────────────────────
 
 export default function VideoPlayer() {
-  const { state, setCurrentTime, toggleSilenceSkip } = useTimeline();
+  const { effects } = useEffects();
+  const cssFilter = effectsToCssFilter(effects);
+  const { state, bRolls, setCurrentTime, toggleSilenceSkip } = useTimeline();
   const videoRef = useRef<HTMLVideoElement>(null);
   const videoUrlRef = useRef<string | null>(null);
   const [subtitlesVisible, setSubtitlesVisible] = useState(true);
@@ -119,7 +123,7 @@ export default function VideoPlayer() {
     onTimeUpdate: setCurrentTime,
   });
 
-  const activeBRoll = state.bRolls.find(b => currentTime >= b.start && currentTime < b.start + b.duration);
+  const activeBRoll = bRolls.find(b => currentTime >= b.start && currentTime < b.start + b.duration);
   const bRollVideoRef = useRef<HTMLVideoElement>(null);
   const prevBRollIdRef = useRef<string | null>(null);
 
@@ -280,6 +284,8 @@ export default function VideoPlayer() {
             maxHeight: '100%',
             objectFit: 'contain',
             aspectRatio: state.aspectRatio,
+            filter: cssFilter || undefined,
+            transition: 'filter 0.2s ease',
           }}
           onClick={togglePlay}
         />
@@ -295,8 +301,12 @@ export default function VideoPlayer() {
             aspectRatio: state.aspectRatio,
             zIndex: 5,
             background: '#000',
-            opacity: activeBRoll ? 1 : 0,
-            transition: 'opacity 0.25s ease',
+            opacity: activeBRoll ? (activeBRoll.spatial?.opacity ?? 1) : 0,
+            transform: activeBRoll?.spatial 
+              ? `translate(${activeBRoll.spatial.x * 100}%, ${activeBRoll.spatial.y * 100}%) scale(${activeBRoll.spatial.scale}) rotate(${activeBRoll.spatial.rotation}deg)`
+              : 'translate(0%, 0%) scale(1) rotate(0deg)',
+            filter: cssFilter || undefined,
+            transition: 'opacity 0.25s ease, transform 0.1s ease, filter 0.2s ease',
             pointerEvents: activeBRoll ? 'auto' : 'none',
           }}
           onClick={togglePlay}

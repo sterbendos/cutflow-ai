@@ -4,7 +4,7 @@
 //   └── Workspace (flex-1)
 //       ├── Sidebar (280px)
 //       ├── VideoPlayer (flex-1)
-//       └── Right Panel (320px, tabs: Transcript / Chat)
+//       └── Right Panel (320px, tabs: Transcript / Chat / Inspector)
 //   Timeline (200px footer)
 
 import { useState } from 'react';
@@ -15,15 +15,25 @@ import TranscriptView from '@/components/TranscriptView';
 import ChatPanel from '@/components/ChatPanel';
 import Timeline from '@/components/Timeline';
 import WelcomeScreen from '@/components/WelcomeScreen';
+import TransformInspector from '@/components/TransformInspector';
 import { useTimeline } from '@/context/TimelineContext';
+import { useEffects } from '@/context/EffectsContext';
 import { AnimatePresence } from 'framer-motion';
 
-type RightTab = 'transcript' | 'chat';
+type RightTab = 'transcript' | 'chat' | 'inspector';
 
 export default function App() {
   const [rightTab, setRightTab] = useState<RightTab>('transcript');
+  const [selectedBRollId, setSelectedBRollId] = useState<string | null>(null);
+  const { effects, setEffects } = useEffects();
   const { state } = useTimeline();
   const hasVideo = Boolean(state.source_video_path);
+
+  // When a B-Roll is selected, auto-switch to Inspector tab
+  const handleSelectBRoll = (id: string | null) => {
+    setSelectedBRollId(id);
+    if (id) setRightTab('inspector');
+  };
 
   return (
     <div className="app-shell">
@@ -37,7 +47,7 @@ export default function App() {
         <Sidebar />
         <VideoPlayer />
 
-        {/* Right panel: tabs for Transcript / Chat */}
+        {/* Right panel: tabs for Transcript / Chat / Inspector */}
         <div className="right-panel">
           <div className="right-panel__tabs">
             <button
@@ -52,14 +62,30 @@ export default function App() {
             >
               AI Chat
             </button>
+            <button
+              className={`right-panel__tab${rightTab === 'inspector' ? ' active' : ''}`}
+              onClick={() => setRightTab('inspector')}
+            >
+              Inspector
+            </button>
           </div>
           <div className="right-panel__content">
-            {rightTab === 'transcript' ? <TranscriptView /> : <ChatPanel />}
+            {rightTab === 'transcript' && <TranscriptView />}
+            {rightTab === 'chat' && <ChatPanel />}
+            {rightTab === 'inspector' && (
+              <div style={{ padding: 12, display: 'flex', flexDirection: 'column', gap: 12, overflowY: 'auto', height: '100%' }}>
+                <TransformInspector
+                  selectedBRollId={selectedBRollId}
+                  effects={effects}
+                  onEffectsChange={setEffects}
+                />
+              </div>
+            )}
           </div>
         </div>
       </div>
 
-      <Timeline />
+      <Timeline onSelectBRoll={handleSelectBRoll} />
     </div>
   );
 }

@@ -6,8 +6,10 @@ import { useTimeline } from '@/context/TimelineContext';
 import { generateFcpxml, type ExportClip } from '@/lib/export/fcpxml';
 import { generateEdl } from '@/lib/export/edl';
 import { generateSrtForExport, normalizeTranscript } from '@/lib/export/subtitles';
-import { scanFacesForExport } from '@/lib/export/faceScanner';
 import { motion, AnimatePresence } from 'framer-motion';
+import { useEffects } from '@/context/EffectsContext';
+import { useCaption, captionPresets } from '@/context/CaptionContext';
+import { captionStyleToSsaForceStyle } from '@/lib/export/captionToSsa';
 
 interface ExportDialogProps {
   open: boolean;
@@ -19,18 +21,31 @@ type ExportQuality = 'high' | 'medium' | 'low';
 type ExportResolution = 'source' | '2160' | '1080' | '720';
 
 export default function ExportDialog({ open, onClose }: ExportDialogProps) {
-  const { state, transcript } = useTimeline();
+  const { effects } = useEffects();
+  const { state, transcript, bRolls } = useTimeline();
+  const { style: captionStyle } = useCaption();
   const [format, setFormat] = useState<ExportFormat>('mp4');
   const [quality, setQuality] = useState<ExportQuality>('high');
   const [resolution, setResolution] = useState<ExportResolution>('source');
   const [includeSubtitles, setIncludeSubtitles] = useState(true);
   const [useGpu, setUseGpu] = useState(true);
-  const [subtitleTemplate, setSubtitleTemplate] = useState('MarginV=70,Fontsize=24,Outline=1,Shadow=1');
+  // Default to the currently active caption preset name
+  const [selectedPresetName, setSelectedPresetName] = useState<string>(() => {
+    // Try to find a preset that matches the current style, fallback to 'CutFlow'
+    return captionPresets[0]?.name ?? 'CutFlow';
+  });
   const [exporting, setExporting] = useState(false);
   const [exportStatus, setExportStatus] = useState<'idle' | 'scanning' | 'success' | 'error'>('idle');
   const [statusMessage, setStatusMessage] = useState('');
   const [scanProgress, setScanProgress] = useState(0);
   const [errorDetail, setErrorDetail] = useState('');
+
+  // Build the SSA force_style string from the selected preset
+  const subtitleForceStyle = useMemo(() => {
+    const preset = captionPresets.find(p => p.name === selectedPresetName);
+    const styleToUse = preset ? preset.style : captionStyle;
+    return captionStyleToSsaForceStyle(styleToUse);
+  }, [selectedPresetName, captionStyle]);
 
   const subtitleWords = useMemo(() => {
     return transcript.length > 0 ? normalizeTranscript(transcript) : normalizeTranscript(state.transcript_json);
@@ -65,19 +80,12 @@ export default function ExportDialog({ open, onClose }: ExportDialogProps) {
             throw new Error('No subtitles available to burn in. Wait for transcription to finish, or disable subtitles for this export.');
           }
 
-          setExportStatus('scanning');
-          setStatusMessage('Analyzing face positions...');
-          setScanProgress(0);
-
-          const facePlacements = await scanFacesForExport(
-            state.source_video_path,
-            subtitleWords,
-            (progress) => setScanProgress(progress)
-          );
-
           setStatusMessage('Generating subtitles...');
 
-          const srtContent = generateSrtForExport(subtitleWords, state.edl, facePlacements);
+          const preset = captionPresets.find(p => p.name === selectedPresetName);
+          const styleToUse = preset ? preset.style : captionStyle;
+
+          const srtContent = generateSrtForExport(subtitleWords, state.edl, styleToUse);
 
           if (!srtContent.trim()) {
             throw new Error('No subtitles available to burn in. Wait for transcription to finish, or disable subtitles for this export.');
@@ -86,16 +94,59 @@ export default function ExportDialog({ open, onClose }: ExportDialogProps) {
           const { writeTextFile } = await import('@tauri-apps/plugin-fs');
           const { tempDir, join } = await import('@tauri-apps/api/path');
           const tmp = await tempDir();
-          srtPath = await join(tmp, 'cutflow_export_subs.srt');
+          // Save as .ass — the ASS file contains all style info in its [V4+ Styles]
+          // section, so no force_style override is needed on the ffmpeg command side.
+          srtPath = await join(tmp, 'cutflow_export_subs.ass');
           await writeTextFile(srtPath, srtContent);
         }
 
+        // ── Build FFmpeg video filter chain from active effects ──────────
+        const filterParts: string[] = [];
+
+        // eq= handles brightness, contrast, saturation
+        const eqParts: string[] = [];
+        if (effects.brightness !== 100) eqParts.push(`brightness=${((effects.brightness - 100) / 100).toFixed(3)}`);
+        if (effects.contrast !== 100) eqParts.push(`contrast=${(effects.contrast / 100).toFixed(3)}`);
+        if (effects.saturation !== 100) eqParts.push(`saturation=${(effects.saturation / 100).toFixed(3)}`);
+        if (eqParts.length > 0) filterParts.push(`eq=${eqParts.join(':')}`);
+
+        // boxblur handles blur
+        if (effects.blur > 0) {
+          const r = Math.max(1, Math.round(effects.blur));
+          filterParts.push(`boxblur=${r}:1`);
+        }
+
+        // hue= handles hue rotation
+        if (effects.hueRotate !== 0) {
+          filterParts.push(`hue=h=${effects.hueRotate}`);
+        }
+
+        const ffmpegFilter = filterParts.length > 0 ? filterParts.join(',') : null;
+
+        // ── Collect B-roll segments for compositing ─────────────────────
+        const brollInputs = bRolls
+          .filter(b => b.path && !b.path.startsWith('mock://') && !b.path.startsWith('appdata/'))
+          .map(b => ({
+            path: b.path,
+            start: b.start,
+            duration: b.duration,
+            scale: b.spatial?.scale ?? 1,
+            x: b.spatial?.x ?? 0,
+            y: b.spatial?.y ?? 0,
+            rotation: b.spatial?.rotation ?? 0,
+            opacity: b.spatial?.opacity ?? 1,
+          }));
+
         // Invoke Rust export command
+        // NOTE: subtitleStyle is intentionally omitted — all style info is baked
+        // into the .ass file header by generateSrtForExport.
         const { invoke } = await import('@tauri-apps/api/core');
         await invoke('execute_export', { 
           outputPath,
           srtPath,
-          subtitleStyle: includeSubtitles ? subtitleTemplate : null
+          subtitleStyle: null,
+          videoFilter: ffmpegFilter,
+          brollInputs: brollInputs.length > 0 ? brollInputs : null,
         });
         setExportStatus('success');
         setStatusMessage('Export completed successfully');
@@ -164,7 +215,7 @@ export default function ExportDialog({ open, onClose }: ExportDialogProps) {
     } finally {
       setExporting(false);
     }
-  }, [state.source_video_path, state.edl, state.transitionType, state.transitionDuration, subtitleWords, format, quality, resolution, includeSubtitles, useGpu, subtitleTemplate, onClose]);
+  }, [state.source_video_path, state.edl, state.transitionType, state.transitionDuration, subtitleWords, format, quality, resolution, includeSubtitles, useGpu, subtitleForceStyle, bRolls, effects, onClose]);
 
   const hasVideo = Boolean(state.source_video_path);
 
@@ -301,26 +352,31 @@ export default function ExportDialog({ open, onClose }: ExportDialogProps) {
             
             {includeSubtitles && (
               <div style={{ marginBottom: 16 }}>
-                <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', display: 'block', marginBottom: 6 }}>Subtitle Template</label>
-                <select
-                  value={subtitleTemplate}
-                  onChange={(e) => setSubtitleTemplate(e.target.value)}
-                  style={{
-                    width: '100%',
-                    padding: '8px',
-                    fontSize: 11,
-                    background: 'var(--surface)',
-                    color: 'var(--text)',
-                    border: '1px solid var(--border)',
-                    borderRadius: 'var(--radius-sm)',
-                    boxSizing: 'border-box'
-                  }}
-                >
-                  <option value="MarginV=70,Fontsize=24,Outline=1,Shadow=1,PrimaryColour=&H00FFFFFF">Standard White</option>
-                  <option value="MarginV=120,Fontsize=32,Outline=2,Shadow=0,PrimaryColour=&H0000FFFF,BorderStyle=3,OutlineColour=&H00000000">TikTok Box</option>
-                  <option value="MarginV=50,Fontsize=20,Outline=0,Shadow=2,PrimaryColour=&H00CCCCCC,Fontname=Courier New">Cinematic Minimal</option>
-                  <option value="MarginV=90,Fontsize=28,Outline=3,Shadow=2,PrimaryColour=&H0000FF00,OutlineColour=&H00000000,Fontname=Impact">Gaming Green</option>
-                </select>
+                <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', display: 'block', marginBottom: 6 }}>Subtitle Style</label>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                  {captionPresets.map((preset) => (
+                    <button
+                      key={preset.name}
+                      onClick={() => setSelectedPresetName(preset.name)}
+                      style={{
+                        padding: '6px 12px',
+                        fontSize: 11,
+                        fontWeight: selectedPresetName === preset.name ? 700 : 500,
+                        background: selectedPresetName === preset.name ? 'var(--teal-primary)' : 'var(--surface)',
+                        color: selectedPresetName === preset.name ? '#fff' : 'var(--text)',
+                        border: selectedPresetName === preset.name ? '1px solid var(--teal-primary)' : '1px solid var(--border)',
+                        borderRadius: 'var(--radius-sm)',
+                        cursor: 'pointer',
+                        transition: 'all 0.15s',
+                      }}
+                    >
+                      {preset.name}
+                    </button>
+                  ))}
+                </div>
+                <p style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 6, marginBottom: 0 }}>
+                  Using: <span style={{ color: 'var(--teal-primary)' }}>{selectedPresetName}</span> — matches your timeline preview style
+                </p>
               </div>
             )}
 

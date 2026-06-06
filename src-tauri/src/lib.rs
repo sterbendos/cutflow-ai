@@ -28,6 +28,90 @@ pub struct AudioSegment {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct SpatialProperties {
+    pub scale: f64,
+    pub x: f64,
+    pub y: f64,
+    pub rotation: f64,
+    pub opacity: f64,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct BRollSegment {
+    pub id: String,
+    pub path: String,
+    pub name: String,
+    pub start: f64,
+    pub duration: f64,
+    pub spatial: Option<SpatialProperties>,
+}
+
+/// Simplified B-Roll input sent from the ExportDialog for FFmpeg compositing.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct BRollInput {
+    pub path: String,
+    pub start: f64,       // start time in the main video timeline (seconds)
+    pub duration: f64,    // how long it overlays (seconds)
+    pub scale: f64,       // 1.0 = full width
+    pub x: f64,           // -1..1 horizontal offset
+    pub y: f64,           // -1..1 vertical offset
+    pub rotation: f64,    // rotation in degrees
+    pub opacity: f64,     // 0..1
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(tag = "type")]
+pub enum TimelineTrack {
+    #[serde(rename = "video")]
+    Video {
+        id: String,
+        name: String,
+        isMuted: bool,
+        isHidden: bool,
+        opacity: f64,
+        order: i32,
+    },
+    #[serde(rename = "audio")]
+    Audio {
+        id: String,
+        name: String,
+        isMuted: bool,
+        isHidden: bool,
+        opacity: f64,
+        order: i32,
+        segments: Vec<AudioSegment>,
+    },
+    #[serde(rename = "b-roll")]
+    BRoll {
+        id: String,
+        name: String,
+        isMuted: bool,
+        isHidden: bool,
+        opacity: f64,
+        order: i32,
+        segments: Vec<BRollSegment>,
+    },
+    #[serde(rename = "text")]
+    Text {
+        id: String,
+        name: String,
+        isMuted: bool,
+        isHidden: bool,
+        opacity: f64,
+        order: i32,
+    },
+    #[serde(rename = "adjustment")]
+    Adjustment {
+        id: String,
+        name: String,
+        isMuted: bool,
+        isHidden: bool,
+        opacity: f64,
+        order: i32,
+    },
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct EdlSegment {
     pub id: String,
     pub start: f64,
@@ -39,11 +123,12 @@ pub struct EdlSegment {
 pub struct TimelineState {
     pub source_video_path: String,
     pub edl: Vec<EdlSegment>,
-    pub audioEdl: Vec<AudioSegment>,
+    pub tracks: Vec<TimelineTrack>,
     pub transitionType: String,
     pub transitionDuration: f64,
     pub current_time: f64,
     pub is_silence_skip_enabled: bool,
+    pub aspectRatio: String,
     #[serde(default)]
     pub transcript_json: Option<serde_json::Value>,
 }
@@ -53,11 +138,12 @@ impl Default for TimelineState {
         TimelineState {
             source_video_path: String::new(),
             edl: Vec::new(),
-            audioEdl: Vec::new(),
+            tracks: Vec::new(),
             transitionType: "none".to_string(),
             transitionDuration: 0.3,
             current_time: 0.0,
             is_silence_skip_enabled: true,
+            aspectRatio: "16:9".to_string(),
             transcript_json: None,
         }
     }
@@ -99,12 +185,14 @@ pub fn normalize_windows_path(raw: &str) -> String {
     }
 }
 
+#[allow(dead_code)]
 fn escape_ffmpeg_subtitle_filename(raw: &str) -> String {
     normalize_windows_path(raw)
         .replace('\'', "\\'")
         .replace(':', "\\:")
 }
 
+#[allow(dead_code)]
 fn escape_ffmpeg_filter_text(raw: &str) -> String {
     raw.replace('\\', "\\\\").replace('\'', "\\'")
 }
@@ -255,6 +343,7 @@ fn toggle_silence_skip(app: AppHandle) -> Result<TimelineState, String> {
 #[tauri::command]
 fn generate_concat_args(
     output_path: String,
+    video_filter: Option<String>,
 ) -> Result<String, String> {
     let state = TIMELINE_STATE
         .read()
@@ -274,13 +363,6 @@ fn generate_concat_args(
         return Err("No segments marked as 'keep'".to_string());
     }
 
-    // For a complex transition like crossfade/xfade, we would need a much more complex filtergraph.
-    // For now, we'll keep the simple select logic if no transitions, and fallback to concat for transitions.
-    // Since xfade requires distinct inputs, implementing it purely with select is hard.
-    // Given timeline constraints, we will keep the standard export unless a transition is requested.
-    // Note: implementing true xfade here would require splitting the input into multiple streams.
-
-    // We will use trim/atrim and concat instead of select/aselect to fix VFR sync issues.
     let mut filtergraph = String::new();
     let mut concat_inputs = String::new();
 
@@ -297,12 +379,26 @@ fn generate_concat_args(
     }
 
     let n = keep_segments.len();
-    filtergraph.push_str(&format!("{}concat=n={}:v=1:a=1[v_cut][a_cut]", concat_inputs, n));
+
+    // Build the final video label — optionally pipe through effects filter
+    let (v_final, extra_filter) = if let Some(ref vfx) = video_filter {
+        if !vfx.is_empty() {
+            filtergraph.push_str(&format!("{}concat=n={}:v=1:a=1[v_concat][a_cut];", concat_inputs, n));
+            filtergraph.push_str(&format!("[v_concat]{}[v_cut]", vfx));
+            ("[v_cut]".to_string(), "".to_string())
+        } else {
+            filtergraph.push_str(&format!("{}concat=n={}:v=1:a=1[v_cut][a_cut]", concat_inputs, n));
+            ("[v_cut]".to_string(), "".to_string())
+        }
+    } else {
+        filtergraph.push_str(&format!("{}concat=n={}:v=1:a=1[v_cut][a_cut]", concat_inputs, n));
+        ("[v_cut]".to_string(), "".to_string())
+    };
+    let _ = extra_filter;
 
     let normalized_input = normalize_windows_path(&state.source_video_path);
     let normalized_output = normalize_windows_path(&output_path);
 
-    // Pass 1 args: trim+concat only, no subtitles in filter_complex
     let args = serde_json::json!([
         "-y",
         "-i",
@@ -310,7 +406,7 @@ fn generate_concat_args(
         "-filter_complex",
         filtergraph,
         "-map",
-        "[v_cut]",
+        v_final,
         "-map",
         "[a_cut]",
         "-c:v",
@@ -341,23 +437,33 @@ async fn execute_export(
     app: AppHandle,
     output_path: String,
     srt_path: Option<String>,
-    subtitle_style: Option<String>,
+    _subtitle_style: Option<String>,
+    video_filter: Option<String>,
+    broll_inputs: Option<Vec<BRollInput>>,
 ) -> Result<String, String> {
-    // ── Pass 1: trim + concat ──────────────────────────────────────────────
-    // We always write pass-1 output to a temp file so we can do a clean
-    // subtitle burn-in as a separate, simple -vf call (no filter_complex
-    // path-escaping nightmares on Windows).
+    // Determine which passes we need:
     let needs_subtitles = srt_path.as_ref().map_or(false, |p| std::fs::metadata(p).is_ok());
+    let valid_brolls: Vec<BRollInput> = broll_inputs
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|b| !b.path.is_empty() && std::fs::metadata(&b.path).is_ok())
+        .collect();
+    let needs_broll = !valid_brolls.is_empty();
 
-    let pass1_path = if needs_subtitles {
-        // Write to a temp file; pass 2 will burn subs onto it → final output
-        let tmp = std::env::temp_dir().join("cutflow_pass1.mp4");
-        tmp.to_string_lossy().to_string()
+    // Temp paths
+    let tmp_dir = std::env::temp_dir();
+    let pass1_path = tmp_dir.join("cutflow_pass1.mp4").to_string_lossy().to_string();
+    let pass2_path = tmp_dir.join("cutflow_pass2.mp4").to_string_lossy().to_string();
+
+    // The final destination of pass 1 is a temp file whenever we have more passes
+    let concat_out = if needs_broll || needs_subtitles {
+        pass1_path.clone()
     } else {
         output_path.clone()
     };
 
-    let args_json = generate_concat_args(pass1_path.clone())?;
+    // ── Pass 1: trim + concat (with optional eq/boxblur/hue filter) ─────────
+    let args_json = generate_concat_args(concat_out.clone(), video_filter.clone())?;
     let args: Vec<String> = serde_json::from_str(&args_json).unwrap();
 
     let out1 = app.shell().sidecar("ffmpeg")
@@ -372,34 +478,164 @@ async fn execute_export(
         return Err(format!("FFmpeg pass-1 (concat) failed:\n{stderr}"));
     }
 
-    // ── Pass 2: subtitle burn-in (only if SRT provided) ───────────────────
-    if needs_subtitles {
-        let srt = srt_path.unwrap();
+    // ── Pass 1.5: B-Roll overlay compositing ─────────────────────────────────
+    //
+    // Strategy:
+    //   -  Input 0 is the pass-1 edited video (full length).
+    //   -  For each B-roll we use -itsoffset <start> so the B-roll stream is
+    //      time-shifted to begin at the correct moment in the output timeline.
+    //   -  We trim the B-roll to exactly <duration> seconds with -t.
+    //   -  This avoids the PTS arithmetic inside filter_complex that was
+    //      causing empty / zero-duration streams.
+    //   -  The overlay is always enabled (no `enable=` guard needed because
+    //      the stream is already trimmed and time-shifted).
+    //   -  Opacity is implemented with the `colorchannelmixer` alpha channel
+    //      after converting to yuva420p.
+    //   -  Rotation uses the `rotate` filter with `fillcolor=none`.
+    let broll_out = if needs_subtitles {
+        pass2_path.clone()
+    } else {
+        output_path.clone()
+    };
 
-        // Build the subtitle filter value
-        // FFmpeg -vf subtitles= on Windows: use forward slashes, escape colon
-        let srt_forward = srt.replace('\\', "/");
-        // Escape the colon after drive letter: C:/... → C\:/...
-        let srt_escaped = if srt_forward.len() > 1 && &srt_forward[1..2] == ":" {
-            format!("{}\\:{}", &srt_forward[..1], &srt_forward[2..])
-        } else {
-            srt_forward.clone()
-        };
+    if needs_broll {
+        // Build the argument list:
+        //   -y
+        //   -i pass1.mp4
+        //   -itsoffset <start_N> -ss 0 -t <duration_N> -i broll_N.mp4
+        //   ... (repeated for each B-roll)
+        //   -filter_complex ...
+        //   -map [vout] -map 0:a  -c:v libx264 ...
+        let mut broll_args: Vec<String> = vec![
+            "-y".into(),
+            "-i".into(), normalize_windows_path(&pass1_path),
+        ];
 
-        let mut vf = format!("subtitles='{}'", srt_escaped);
-        if let Some(ref style) = subtitle_style {
-            let style_trimmed = style.trim();
-            if !style_trimmed.is_empty() {
-                vf.push_str(&format!(":force_style='{}'", style_trimmed.replace('\'', "\\'")));
-            }
+        for br in &valid_brolls {
+            // Time-shift: the B-roll will appear in the output at `br.start` seconds.
+            broll_args.push("-itsoffset".into());
+            broll_args.push(format!("{:.6}", br.start));
+            // Trim the B-roll so it doesn't extend past its window
+            broll_args.push("-t".into());
+            broll_args.push(format!("{:.6}", br.duration));
+            broll_args.push("-i".into());
+            broll_args.push(normalize_windows_path(&br.path));
         }
 
-        let normalized_pass1 = normalize_windows_path(&pass1_path);
-        let normalized_out   = normalize_windows_path(&output_path);
+        // Build filter_complex
+        // Each B-roll input is scaled, optionally rotated, converted to yuva420p
+        // (for alpha support), then its alpha multiplied by the desired opacity,
+        // then overlaid on top of the running base stream.
+        let mut filter = String::new();
+        let mut last_label = "[0:v]".to_string();
+
+        for (i, br) in valid_brolls.iter().enumerate() {
+            let inp_idx = i + 1; // ffmpeg input index (0 = main video)
+            let scaled_label = format!("[sc{}]", i);
+            let out_label   = format!("[v{}]", i);
+
+            let scale_factor = br.scale.max(0.01);
+            // x_offset: br.x is -1..1 → map to fraction of (W - w)
+            let x_expr = format!("(W-w)*{:.6}", (br.x + 1.0) / 2.0);
+            let y_expr = format!("(H-h)*{:.6}", (br.y + 1.0) / 2.0);
+            let alpha  = br.opacity.clamp(0.0, 1.0);
+
+            // Step 1: scale → yuva420p (gives alpha channel) → optional rotate → opacity
+            let rot_part = if br.rotation.abs() > 0.001 {
+                format!(",rotate={:.6}*PI/180:ow=hypot(iw\\,ih):oh=ow:fillcolor=none", br.rotation)
+            } else {
+                String::new()
+            };
+
+            filter.push_str(&format!(
+                "[{inp}:v]scale=iw*{sc:.6}:ih*{sc:.6},format=yuva420p{rot},colorchannelmixer=aa={al:.6}{sl};",
+                inp = inp_idx,
+                sc  = scale_factor,
+                rot = rot_part,
+                al  = alpha,
+                sl  = scaled_label,
+            ));
+
+            // Step 2: overlay on the running base
+            // shortest=0 keeps the base video running after the B-roll ends.
+            filter.push_str(&format!(
+                "{last}[{sl}]overlay={x}:{y}:shortest=0{ol};",
+                last = last_label,
+                sl   = &scaled_label[1..scaled_label.len()-1], // strip [ ]
+                x    = x_expr,
+                y    = y_expr,
+                ol   = out_label,
+            ));
+
+            last_label = out_label;
+        }
+
+        let final_v_label = format!("[v{}]", valid_brolls.len() - 1);
+        let filter_trimmed = filter.trim_end_matches(';');
+
+        broll_args.extend([
+            "-filter_complex".into(), filter_trimmed.to_string(),
+            "-map".into(), final_v_label,
+            "-map".into(), "0:a".into(),
+            "-c:v".into(), "libx264".into(),
+            "-preset".into(), "fast".into(),
+            "-crf".into(), "18".into(),
+            "-c:a".into(), "copy".into(),
+            "-movflags".into(), "+faststart".into(),
+            normalize_windows_path(&broll_out),
+        ]);
+
+        let out_broll = app.shell().sidecar("ffmpeg")
+            .map_err(|e| format!("FFmpeg sidecar error: {e}"))?
+            .args(broll_args)
+            .output()
+            .await
+            .map_err(|e| format!("FFmpeg B-roll pass spawn failed: {e}"))?;
+
+        let _ = std::fs::remove_file(&pass1_path);
+
+        if !out_broll.status.success() {
+            let stderr = String::from_utf8_lossy(&out_broll.stderr).to_string();
+            return Err(format!("FFmpeg B-roll compositing failed:\n{stderr}"));
+        }
+    }
+
+    // ── Pass 2: subtitle burn-in via ASS filter ───────────────────────────
+    //
+    // The subtitle file is a self-contained .ass script generated by
+    // generateSrtForExport() in subtitles.ts.  It already embeds all style
+    // information (font, size, colour, box, alignment, highlights) in its
+    // [V4+ Styles] section, so we use the `ass=` filter (not `subtitles=`
+    // with force_style) to preserve those styles exactly as authored.
+    //
+    // Path escaping rules for the ASS filter:
+    //   • Backslashes → forward slashes
+    //   • Drive colon must be escaped: C:/foo → C\:/foo
+    //   • Single quotes must be escaped: '  → \'
+    if needs_subtitles {
+        let ass_path = srt_path.unwrap();
+        let sub_input = if needs_broll { &broll_out } else { &pass1_path };
+
+        // Normalise to forward slashes
+        let fwd = ass_path.replace('\\', "/");
+        // Escape the drive-letter colon for ffmpeg filter string
+        let escaped = if fwd.len() > 1 && &fwd[1..2] == ":" {
+            format!("{}\\:{}", &fwd[..1], &fwd[2..])
+        } else {
+            fwd.clone()
+        };
+        // Escape any remaining single quotes
+        let escaped = escaped.replace('\'', "\\'");
+
+        // Use the `ass` filter — it reads the ASS [V4+ Styles] section natively.
+        let vf = format!("ass='{}'", escaped);
+
+        let normalized_sub_input = normalize_windows_path(sub_input);
+        let normalized_out = normalize_windows_path(&output_path);
 
         let pass2_args: Vec<String> = vec![
             "-y".into(),
-            "-i".into(), normalized_pass1,
+            "-i".into(), normalized_sub_input,
             "-vf".into(), vf,
             "-c:v".into(), "libx264".into(),
             "-preset".into(), "fast".into(),
@@ -414,10 +650,11 @@ async fn execute_export(
             .args(pass2_args)
             .output()
             .await
-            .map_err(|e| format!("FFmpeg pass-2 spawn failed: {e}"))?;
+            .map_err(|e| format!("FFmpeg pass-2 (subtitles) spawn failed: {e}"))?;
 
-        // Clean up temp file regardless
-        let _ = std::fs::remove_file(&pass1_path);
+        // Clean up temp files regardless
+        let _ = std::fs::remove_file(sub_input);
+        let _ = std::fs::remove_file(&ass_path);
 
         if !out2.status.success() {
             let stderr = String::from_utf8_lossy(&out2.stderr).to_string();
@@ -598,6 +835,46 @@ async fn extract_audio_for_transcription(app: AppHandle, video_path: String) -> 
 }
 
 // ─────────────────────────────────────────────────────────────
+// Tauri Command: convert_audio_to_wav
+// Converts a recorded webm/ogg audio file to WAV via FFmpeg
+// ─────────────────────────────────────────────────────────────
+
+#[tauri::command]
+async fn convert_audio_to_wav(app: AppHandle, input_path: String, output_path: String) -> Result<(), String> {
+    let args = vec![
+        "-y".to_string(),
+        "-i".to_string(), input_path.clone(),
+        "-ar".to_string(), "44100".to_string(),
+        "-ac".to_string(), "2".to_string(),
+        "-f".to_string(), "wav".to_string(),
+        output_path,
+    ];
+
+    let out = app.shell().sidecar("ffmpeg")
+        .map_err(|e| format!("FFmpeg sidecar error: {e}"))?
+        .args(args)
+        .output()
+        .await
+        .map_err(|e| format!("FFmpeg audio convert spawn failed: {e}"))?;
+
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+        return Err(format!("FFmpeg audio conversion failed:\n{stderr}"));
+    }
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────
+// Tauri Command: delete_file
+// Deletes a file from disk (used to clean up temp files)
+// ─────────────────────────────────────────────────────────────
+
+#[tauri::command]
+fn delete_file(path: String) -> Result<(), String> {
+    std::fs::remove_file(&path).map_err(|e| format!("Failed to delete {path}: {e}"))
+}
+
+// ─────────────────────────────────────────────────────────────
 // Main Entry Point
 // ─────────────────────────────────────────────────────────────
 
@@ -628,6 +905,8 @@ pub fn run() {
             execute_export,
             analyze_video,
             extract_audio_for_transcription,
+            convert_audio_to_wav,
+            delete_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running CutFlow AI");

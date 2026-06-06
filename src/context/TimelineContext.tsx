@@ -10,9 +10,11 @@ import React, {
   useReducer,
   useRef,
   useState,
+  useMemo,
 } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
+import { TimelineTrack, BRollTrack, AudioTrack } from '@/lib/types/Track';
 
 // ─────────────────────────────────────────────────────────────
 // Data Contracts — mirror the Rust structs exactly
@@ -37,19 +39,27 @@ export interface AudioSegment {
   type: 'sfx' | 'music' | 'voice';
 }
 
+export interface SpatialProperties {
+  scale: number;
+  x: number;
+  y: number;
+  rotation: number;
+  opacity: number;
+}
+
 export interface BRollSegment {
   id: string;
   path: string;
   name: string;
   start: number;
   duration: number;
+  spatial?: SpatialProperties;
 }
 
 export interface TimelineState {
   source_video_path: string;
   edl: EdlSegment[];
-  audioEdl: AudioSegment[];
-  bRolls: BRollSegment[];
+  tracks: TimelineTrack[];
   transitionType: TransitionType;
   transitionDuration: number;
   current_time: number;
@@ -71,19 +81,16 @@ type TimelineAction =
   | { type: 'SET_SOURCE_VIDEO'; payload: { path: string; duration: number } }
   | { type: 'MARK_SEGMENT'; payload: { id: string; segmentType: SegmentType } }
   | { type: 'SET_TRANSITION'; payload: { type: TransitionType; duration: number } }
-  | { type: 'ADD_AUDIO_SEGMENT'; payload: AudioSegment }
-  | { type: 'REMOVE_AUDIO_SEGMENT'; payload: string }
-  | { type: 'ADD_BROLL_SEGMENT'; payload: BRollSegment }
-  | { type: 'UPDATE_BROLL_SEGMENT'; payload: { id: string; partial: Partial<BRollSegment> } }
-  | { type: 'REMOVE_BROLL_SEGMENT'; payload: string }
+  | { type: 'ADD_TRACK'; payload: TimelineTrack }
+  | { type: 'REMOVE_TRACK'; payload: string }
+  | { type: 'UPDATE_TRACK'; payload: { id: string; partial: Partial<TimelineTrack> } }
   | { type: 'SET_ASPECT_RATIO'; payload: AspectRatio }
   | { type: 'SET_TRANSCRIPT_JSON'; payload: { text: string; start: number; end: number }[] };
 
 const initialState: TimelineState = {
   source_video_path: '',
   edl: [],
-  audioEdl: [],
-  bRolls: [],
+  tracks: [],
   transitionType: 'none',
   transitionDuration: 0.3,
   current_time: 0,
@@ -137,30 +144,21 @@ function timelineReducer(
         transitionDuration: action.payload.duration,
       };
 
-    case 'ADD_AUDIO_SEGMENT':
-      return { ...state, audioEdl: [...state.audioEdl, action.payload] };
+    case 'ADD_TRACK':
+      return { ...state, tracks: [...state.tracks, action.payload] };
 
-    case 'REMOVE_AUDIO_SEGMENT':
+    case 'REMOVE_TRACK':
       return {
         ...state,
-        audioEdl: state.audioEdl.filter((s) => s.id !== action.payload),
+        tracks: state.tracks.filter((t) => t.id !== action.payload),
       };
 
-    case 'ADD_BROLL_SEGMENT':
-      return { ...state, bRolls: [...state.bRolls, action.payload] };
-
-    case 'UPDATE_BROLL_SEGMENT':
+    case 'UPDATE_TRACK':
       return {
         ...state,
-        bRolls: state.bRolls.map((s) =>
-          s.id === action.payload.id ? { ...s, ...action.payload.partial } : s
+        tracks: state.tracks.map((t) =>
+          t.id === action.payload.id ? { ...t, ...action.payload.partial } as TimelineTrack : t
         ),
-      };
-
-    case 'REMOVE_BROLL_SEGMENT':
-      return {
-        ...state,
-        bRolls: state.bRolls.filter((s) => s.id !== action.payload),
       };
 
     case 'SET_ASPECT_RATIO':
@@ -194,7 +192,15 @@ interface TimelineContextValue {
   transcript: TranscriptWord[];
   isTranscribing: boolean;
   splitSegment: (time: number) => Promise<void>;
+  splitTrackSegment: (trackId: string, segmentId: string, time: number) => void;
   setTransition: (type: TransitionType, duration: number) => void;
+  // Track actions
+  addTrack: (track: TimelineTrack) => void;
+  removeTrack: (id: string) => void;
+  updateTrack: (id: string, partial: Partial<TimelineTrack>) => void;
+  // Compatibility wrappers
+  bRolls: BRollSegment[];
+  audioEdl: AudioSegment[];
   addAudioSegment: (segment: AudioSegment) => void;
   removeAudioSegment: (id: string) => void;
   addBRollSegment: (segment: BRollSegment) => void;
@@ -211,6 +217,7 @@ interface TimelineContextValue {
   redo: () => void;
   canUndo: boolean;
   canRedo: boolean;
+  saveHistory: () => void;
 }
 
 const TimelineContext = createContext<TimelineContextValue | null>(null);
@@ -232,8 +239,8 @@ export function TimelineProvider({ children }: { children: React.ReactNode }) {
   const stateRef = useRef(state);
   
   // Push to history when we make significant changes
-  const saveHistory = useCallback((currentState: TimelineState) => {
-    setPast((p) => [...p, currentState]);
+  const saveHistory = useCallback(() => {
+    setPast((p) => [...p, stateRef.current]);
     setFuture([]);
   }, []);
 
@@ -333,7 +340,7 @@ export function TimelineProvider({ children }: { children: React.ReactNode }) {
       dispatch({ type: 'REPLACE_STATE', payload: newState });
     } catch {
       // Fallback: mark overlapping segments locally
-      saveHistory(stateRef.current);
+      saveHistory();
       const updated = stateRef.current.edl.map((seg) => {
         const overlaps = seg.start < end && seg.end > start;
         return overlaps ? { ...seg, segment_type: 'user-deleted' as SegmentType } : seg;
@@ -355,7 +362,7 @@ export function TimelineProvider({ children }: { children: React.ReactNode }) {
         });
         dispatch({ type: 'REPLACE_STATE', payload: newState });
       } catch {
-        saveHistory(stateRef.current);
+        saveHistory();
         dispatch({ type: 'MARK_SEGMENT', payload: { id, segmentType } });
       }
     },
@@ -404,7 +411,7 @@ export function TimelineProvider({ children }: { children: React.ReactNode }) {
           { id: crypto.randomUUID(), start: time, end: seg.end, segment_type: 'keep' },
         ];
         
-        saveHistory(stateRef.current);
+        saveHistory();
         const newEdl = [...stateRef.current.edl];
         newEdl.splice(segIndex, 1, ...newSegments);
         dispatch({
@@ -415,33 +422,148 @@ export function TimelineProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
+  const splitTrackSegment = useCallback((trackId: string, segmentId: string, time: number) => {
+    saveHistory();
+    const track = stateRef.current.tracks.find(t => t.id === trackId);
+    if (!track) return;
+
+    if (track.type === 'b-roll') {
+      const bTrack = track as BRollTrack;
+      const segIndex = bTrack.segments.findIndex(
+        s => s.id === segmentId && s.start < time && (s.start + s.duration) > time
+      );
+      if (segIndex !== -1) {
+        const seg = bTrack.segments[segIndex];
+        const duration1 = time - seg.start;
+        const duration2 = (seg.start + seg.duration) - time;
+
+        const seg1: BRollSegment = {
+          ...seg,
+          duration: duration1
+        };
+        const seg2: BRollSegment = {
+          ...seg,
+          id: crypto.randomUUID(),
+          start: time,
+          duration: duration2
+        };
+
+        const newSegments = [...bTrack.segments];
+        newSegments.splice(segIndex, 1, seg1, seg2);
+        dispatch({
+          type: 'UPDATE_TRACK',
+          payload: { id: trackId, partial: { segments: newSegments } as any }
+        });
+      }
+    } else if (track.type === 'audio') {
+      const aTrack = track as AudioTrack;
+      const segIndex = aTrack.segments.findIndex(
+        s => s.id === segmentId && s.start < time && (s.start + s.duration) > time
+      );
+      if (segIndex !== -1) {
+        const seg = aTrack.segments[segIndex];
+        const duration1 = time - seg.start;
+        const duration2 = (seg.start + seg.duration) - time;
+
+        const seg1: AudioSegment = {
+          ...seg,
+          duration: duration1
+        };
+        const seg2: AudioSegment = {
+          ...seg,
+          id: crypto.randomUUID(),
+          start: time,
+          duration: duration2
+        };
+
+        const newSegments = [...aTrack.segments];
+        newSegments.splice(segIndex, 1, seg1, seg2);
+        dispatch({
+          type: 'UPDATE_TRACK',
+          payload: { id: trackId, partial: { segments: newSegments } as any }
+        });
+      }
+    }
+  }, [saveHistory]);
+
   const setTransition = useCallback((type: TransitionType, duration: number) => {
+    saveHistory();
     dispatch({ type: 'SET_TRANSITION', payload: { type, duration } });
+  }, [saveHistory]);
+
+  const addTrack = useCallback((track: TimelineTrack) => {
+    saveHistory();
+    dispatch({ type: 'ADD_TRACK', payload: track });
+  }, [saveHistory]);
+
+  const removeTrack = useCallback((id: string) => {
+    saveHistory();
+    dispatch({ type: 'REMOVE_TRACK', payload: id });
+  }, [saveHistory]);
+
+  const updateTrack = useCallback((id: string, partial: Partial<TimelineTrack>) => {
+    dispatch({ type: 'UPDATE_TRACK', payload: { id, partial } });
   }, []);
 
+  // Compute backward-compatible arrays
+  const bRolls = useMemo(() => {
+    const track = state.tracks.find(t => t.type === 'b-roll');
+    return track?.type === 'b-roll' ? track.segments : [];
+  }, [state.tracks]);
+
+  const audioEdl = useMemo(() => {
+    const track = state.tracks.find(t => t.type === 'audio');
+    return track?.type === 'audio' ? track.segments : [];
+  }, [state.tracks]);
+
+  // Backward compatible actions that modify tracks
   const addAudioSegment = useCallback((segment: AudioSegment) => {
-    dispatch({ type: 'ADD_AUDIO_SEGMENT', payload: segment });
-  }, []);
+    saveHistory();
+    const track = stateRef.current.tracks.find(t => t.type === 'audio');
+    if (track && track.type === 'audio') {
+      dispatch({ type: 'UPDATE_TRACK', payload: { id: track.id, partial: { segments: [...track.segments, segment] } as any } });
+    } else {
+      dispatch({ type: 'ADD_TRACK', payload: { type: 'audio', id: crypto.randomUUID(), name: 'Audio', isMuted: false, isHidden: false, opacity: 1, order: 2, segments: [segment] } });
+    }
+  }, [saveHistory]);
 
   const removeAudioSegment = useCallback((id: string) => {
-    dispatch({ type: 'REMOVE_AUDIO_SEGMENT', payload: id });
-  }, []);
+    saveHistory();
+    const track = stateRef.current.tracks.find(t => t.type === 'audio');
+    if (track && track.type === 'audio') {
+      dispatch({ type: 'UPDATE_TRACK', payload: { id: track.id, partial: { segments: track.segments.filter(s => s.id !== id) } as any } });
+    }
+  }, [saveHistory]);
 
   const addBRollSegment = useCallback((segment: BRollSegment) => {
-    dispatch({ type: 'ADD_BROLL_SEGMENT', payload: segment });
-  }, []);
+    saveHistory();
+    const track = stateRef.current.tracks.find(t => t.type === 'b-roll');
+    if (track && track.type === 'b-roll') {
+      dispatch({ type: 'UPDATE_TRACK', payload: { id: track.id, partial: { segments: [...track.segments, segment] } as any } });
+    } else {
+      dispatch({ type: 'ADD_TRACK', payload: { type: 'b-roll', id: crypto.randomUUID(), name: 'B-Roll', isMuted: false, isHidden: false, opacity: 1, order: 1, segments: [segment] } });
+    }
+  }, [saveHistory]);
 
   const updateBRollSegment = useCallback((id: string, partial: Partial<BRollSegment>) => {
-    dispatch({ type: 'UPDATE_BROLL_SEGMENT', payload: { id, partial } });
+    const track = stateRef.current.tracks.find(t => t.type === 'b-roll');
+    if (track && track.type === 'b-roll') {
+      dispatch({ type: 'UPDATE_TRACK', payload: { id: track.id, partial: { segments: track.segments.map(s => s.id === id ? { ...s, ...partial } : s) } as any } });
+    }
   }, []);
 
   const removeBRollSegment = useCallback((id: string) => {
-    dispatch({ type: 'REMOVE_BROLL_SEGMENT', payload: id });
-  }, []);
+    saveHistory();
+    const track = stateRef.current.tracks.find(t => t.type === 'b-roll');
+    if (track && track.type === 'b-roll') {
+      dispatch({ type: 'UPDATE_TRACK', payload: { id: track.id, partial: { segments: track.segments.filter(s => s.id !== id) } as any } });
+    }
+  }, [saveHistory]);
 
   const setAspectRatio = useCallback((ratio: AspectRatio) => {
+    saveHistory();
     dispatch({ type: 'SET_ASPECT_RATIO', payload: ratio });
-  }, []);
+  }, [saveHistory]);
 
   const retranscribe = useCallback((langOverride?: string) => {
     // Always read from stateRef so we get the latest path even if called
@@ -469,6 +591,29 @@ export function TimelineProvider({ children }: { children: React.ReactNode }) {
     dispatch({ type: 'REPLACE_STATE', payload: next });
   }, [past, future]);
 
+  // Global Keyboard Shortcuts for Undo / Redo
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Ignore if typing in an input
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+        e.preventDefault();
+        if (e.shiftKey) {
+          redo();
+        } else {
+          undo();
+        }
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') {
+        e.preventDefault();
+        redo();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [undo, redo]);
+
   return (
     <TimelineContext.Provider
       value={{
@@ -484,7 +629,13 @@ export function TimelineProvider({ children }: { children: React.ReactNode }) {
         transcript,
         isTranscribing,
         splitSegment,
+        splitTrackSegment,
         setTransition,
+        addTrack,
+        removeTrack,
+        updateTrack,
+        bRolls,
+        audioEdl,
         addAudioSegment,
         removeAudioSegment,
         addBRollSegment,
@@ -501,6 +652,7 @@ export function TimelineProvider({ children }: { children: React.ReactNode }) {
         redo,
         canUndo: past.length > 0,
         canRedo: future.length > 0,
+        saveHistory,
       }}
     >
       {children}

@@ -4,6 +4,8 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { EdlSegment, useTimeline } from '@/context/TimelineContext';
+import AudioWaveform from './AudioWaveform';
+import TimelineTrackRow from './TimelineTrackRow';
 
 // ─── Constants ────────────────────────────────────────────────
 
@@ -35,12 +37,13 @@ function getSegmentTitle(seg: EdlSegment): string {
 
 // ─────────────────────────────────────────────────────────────
 
-export default function Timeline() {
-  const { state, markSegment, splitSegment, removeAudioSegment, transcript, removeBRollSegment, updateBRollSegment } = useTimeline();
+export default function Timeline({ onSelectBRoll }: { onSelectBRoll?: (id: string | null) => void }) {
+  const { state, markSegment, splitSegment, splitTrackSegment, transcript, updateBRollSegment, saveHistory } = useTimeline();
   const railRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const [isDraggingPlayhead, setIsDraggingPlayhead] = useState(false);
   const [draggingBRoll, setDraggingBRoll] = useState<{ id: string, startX: number, startTime: number } | null>(null);
+  const [selectedBRollId, setSelectedBRollId] = useState<string | null>(null);
   const [localTime, setLocalTime] = useState(0);
   const [zoomLevel, setZoomLevel] = useState(1);
   const [hideCuts, setHideCuts] = useState(true); // Default to streamlined
@@ -212,11 +215,21 @@ export default function Timeline() {
     };
   }, [draggingBRoll, activeDuration, updateBRollSegment]);
 
-  // ── Segment click: cycle type keep → silence → user-deleted → keep ──
-  async function handleSegmentClick(
-    e: React.MouseEvent,
-    seg: EdlSegment
-  ) {
+  const handleSegmentMouseDown = useCallback((e: React.MouseEvent, trackId: string, segmentId: string, start: number) => {
+    e.stopPropagation();
+    if (e.shiftKey) {
+      // Razor tool: split track segment at exact click position
+      const t = xToTime(e.clientX);
+      splitTrackSegment(trackId, segmentId, t);
+      return;
+    }
+    saveHistory();
+    setDraggingBRoll({ id: segmentId, startX: e.clientX, startTime: start });
+    setSelectedBRollId(segmentId);
+    onSelectBRoll?.(segmentId);
+  }, [saveHistory, onSelectBRoll, xToTime, splitTrackSegment]);
+
+  const handleSegmentClick = async (e: React.MouseEvent, seg: EdlSegment) => {
     e.stopPropagation();
     if (e.shiftKey) {
        // Razor tool: split at exact click position
@@ -232,6 +245,41 @@ export default function Timeline() {
         : 'keep';
     await markSegment(seg.id, nextType);
   }
+
+  // ── Ctrl+K / Cmd+K: Razor at playhead ─────────────────────
+  // Splits the main EDL segment AND any track segments (B-roll, audio)
+  // that span the current playhead position — identical to Premiere Pro.
+  useEffect(() => {
+    const handleKeyDown = async (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        const t = state.current_time;
+
+        // 1. Split the main EDL segment if one spans t
+        await splitSegment(t);
+
+        // 2. Split every track segment that spans t
+        for (const track of state.tracks) {
+          if (track.type === 'b-roll') {
+            for (const seg of (track as any).segments) {
+              if (seg.start < t && (seg.start + seg.duration) > t) {
+                splitTrackSegment(track.id, seg.id, t);
+              }
+            }
+          } else if (track.type === 'audio') {
+            for (const seg of (track as any).segments) {
+              if (seg.start < t && (seg.start + seg.duration) > t) {
+                splitTrackSegment(track.id, seg.id, t);
+              }
+            }
+          }
+        }
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [state.current_time, state.tracks, splitSegment, splitTrackSegment]);
 
   // ── Segment counts for the legend ─────────────────────────
   const counts = useMemo(
@@ -390,55 +438,17 @@ export default function Timeline() {
               </div>
             </div>
 
-            {/* B-Roll track */}
-            <div className="timeline-track" style={{ height: 32, background: 'rgba(0,0,0,0.1)' }}>
-              <span className="timeline-track__label" aria-label="B-Roll track" style={{ position: 'sticky', left: 0, zIndex: 10, fontSize: 9 }}>
-                B-ROLL
-              </span>
-              <div
-                className="timeline-track__rail"
-                style={{ cursor: 'default' }}
-                aria-label="B-Roll timeline"
-              >
-                {state.bRolls.map((seg) => {
-                  const leftPct = timeToPct(seg.start);
-                  const widthPct = timeToPct(seg.start + seg.duration) - leftPct;
-                  return (
-                    <div
-                      key={seg.id}
-                      style={{
-                        position: 'absolute',
-                        left: `${leftPct}%`,
-                        width: `${widthPct}%`,
-                        background: '#0ea5e9',
-                        border: '1px solid rgba(0,0,0,0.3)',
-                        borderRadius: '3px',
-                        height: '80%',
-                        top: '10%',
-                        opacity: 0.9,
-                        cursor: draggingBRoll?.id === seg.id ? 'grabbing' : 'grab',
-                        display: 'flex',
-                        alignItems: 'center',
-                        padding: '0 4px',
-                        fontSize: '10px',
-                        color: '#fff',
-                        overflow: 'hidden',
-                        whiteSpace: 'nowrap',
-                        zIndex: draggingBRoll?.id === seg.id ? 20 : 1
-                      }}
-                      title="Drag to move, double-click to remove"
-                      onMouseDown={(e) => {
-                        e.stopPropagation();
-                        setDraggingBRoll({ id: seg.id, startX: e.clientX, startTime: seg.start });
-                      }}
-                      onDoubleClick={() => removeBRollSegment(seg.id)}
-                    >
-                       {seg.name}
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
+            {/* Dynamic additional tracks (B-Roll, Audio FX, etc) */}
+            {state.tracks.map((track) => (
+              <TimelineTrackRow
+                key={track.id}
+                track={track}
+                timeToPct={timeToPct}
+                draggingBRollId={draggingBRoll?.id}
+                selectedBRollId={selectedBRollId}
+                onSegmentMouseDown={handleSegmentMouseDown}
+              />
+            ))}
 
             {/* Video track */}
             <div className="timeline-track" style={{ height: 48 }}>
@@ -524,60 +534,13 @@ export default function Timeline() {
                         opacity: 0.6,
                         height: '60%',
                         top: '20%',
+                        overflow: 'hidden',
                       }}
                       aria-hidden="true"
-                    />
-                  );
-                })}
-                <div
-                  className="timeline-playhead"
-                  style={{ left: 'var(--playhead-pct, 0%)', opacity: 0.5 }}
-                  aria-hidden="true"
-                />
-              </div>
-            </div>
-
-            {/* Extra Audio (Music/SFX) track */}
-            <div className="timeline-track">
-              <span className="timeline-track__label" aria-label="Audio FX track" style={{ position: 'sticky', left: 0, zIndex: 10 }}>
-                FX
-              </span>
-              <div
-                id="timeline-audio-fx-rail"
-                className="timeline-track__rail"
-                style={{ cursor: 'default' }}
-                aria-label="Audio FX timeline"
-              >
-                {state.audioEdl.map((seg) => {
-                  const leftPct = timeToPct(seg.start);
-                  const widthPct = timeToPct(seg.start + seg.duration) - leftPct;
-                  const color = seg.type === 'music' ? '#8b5cf6' : seg.type === 'voice' ? '#ec4899' : '#14b8a6';
-                  return (
-                    <div
-                      key={seg.id}
-                      style={{
-                        position: 'absolute',
-                        left: `${leftPct}%`,
-                        width: `${widthPct}%`,
-                        background: color,
-                        border: '1px solid rgba(0,0,0,0.3)',
-                        borderRadius: '3px',
-                        height: '80%',
-                        top: '10%',
-                        opacity: 0.8,
-                        cursor: 'pointer',
-                        display: 'flex',
-                        alignItems: 'center',
-                        padding: '0 4px',
-                        fontSize: '10px',
-                        color: '#fff',
-                        overflow: 'hidden',
-                        whiteSpace: 'nowrap'
-                      }}
-                      title="Double-click to delete"
-                      onDoubleClick={() => removeAudioSegment(seg.id)}
                     >
-                       {seg.type.toUpperCase()}
+                      {seg.segment_type === 'keep' && state.source_video_path && (
+                        <AudioWaveform filePath={state.source_video_path} start={seg.start} duration={seg.end - seg.start} color="#ffffff" />
+                      )}
                     </div>
                   );
                 })}
@@ -588,6 +551,7 @@ export default function Timeline() {
                 />
               </div>
             </div>
+
           </div>
         </div>
       </div>
