@@ -36,10 +36,11 @@ function getSegmentTitle(seg: EdlSegment): string {
 // ─────────────────────────────────────────────────────────────
 
 export default function Timeline() {
-  const { state, markSegment, splitSegment, removeAudioSegment, transcript, removeBRollSegment } = useTimeline();
+  const { state, markSegment, splitSegment, removeAudioSegment, transcript, removeBRollSegment, updateBRollSegment } = useTimeline();
   const railRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const [isDraggingPlayhead, setIsDraggingPlayhead] = useState(false);
+  const [draggingBRoll, setDraggingBRoll] = useState<{ id: string, startX: number, startTime: number } | null>(null);
   const [localTime, setLocalTime] = useState(0);
   const [zoomLevel, setZoomLevel] = useState(1);
   const [hideCuts, setHideCuts] = useState(true); // Default to streamlined
@@ -182,6 +183,34 @@ export default function Timeline() {
       window.removeEventListener('mouseup', onMouseUp);
     };
   }, [isDraggingPlayhead, xToTime]);
+
+  // ── B-Roll Dragging ──
+  useEffect(() => {
+    if (!draggingBRoll || !railRef.current) return;
+
+    const onMouseMove = (e: MouseEvent) => {
+      const dx = e.clientX - draggingBRoll.startX;
+      const railWidth = railRef.current!.offsetWidth;
+      const timeDelta = (dx / railWidth) * activeDuration;
+      let newTime = draggingBRoll.startTime + timeDelta;
+      
+      // Clamp to boundaries
+      if (newTime < 0) newTime = 0;
+      
+      updateBRollSegment(draggingBRoll.id, { start: newTime });
+    };
+
+    const onMouseUp = () => {
+      setDraggingBRoll(null);
+    };
+
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+    return () => {
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+    };
+  }, [draggingBRoll, activeDuration, updateBRollSegment]);
 
   // ── Segment click: cycle type keep → silence → user-deleted → keep ──
   async function handleSegmentClick(
@@ -387,16 +416,21 @@ export default function Timeline() {
                         height: '80%',
                         top: '10%',
                         opacity: 0.9,
-                        cursor: 'pointer',
+                        cursor: draggingBRoll?.id === seg.id ? 'grabbing' : 'grab',
                         display: 'flex',
                         alignItems: 'center',
                         padding: '0 4px',
                         fontSize: '10px',
                         color: '#fff',
                         overflow: 'hidden',
-                        whiteSpace: 'nowrap'
+                        whiteSpace: 'nowrap',
+                        zIndex: draggingBRoll?.id === seg.id ? 20 : 1
                       }}
-                      title="Double-click to remove B-Roll"
+                      title="Drag to move, double-click to remove"
+                      onMouseDown={(e) => {
+                        e.stopPropagation();
+                        setDraggingBRoll({ id: seg.id, startX: e.clientX, startTime: seg.start });
+                      }}
                       onDoubleClick={() => removeBRollSegment(seg.id)}
                     >
                        {seg.name}

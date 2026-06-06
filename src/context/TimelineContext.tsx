@@ -74,6 +74,7 @@ type TimelineAction =
   | { type: 'ADD_AUDIO_SEGMENT'; payload: AudioSegment }
   | { type: 'REMOVE_AUDIO_SEGMENT'; payload: string }
   | { type: 'ADD_BROLL_SEGMENT'; payload: BRollSegment }
+  | { type: 'UPDATE_BROLL_SEGMENT'; payload: { id: string; partial: Partial<BRollSegment> } }
   | { type: 'REMOVE_BROLL_SEGMENT'; payload: string }
   | { type: 'SET_ASPECT_RATIO'; payload: AspectRatio }
   | { type: 'SET_TRANSCRIPT_JSON'; payload: { text: string; start: number; end: number }[] };
@@ -148,6 +149,14 @@ function timelineReducer(
     case 'ADD_BROLL_SEGMENT':
       return { ...state, bRolls: [...state.bRolls, action.payload] };
 
+    case 'UPDATE_BROLL_SEGMENT':
+      return {
+        ...state,
+        bRolls: state.bRolls.map((s) =>
+          s.id === action.payload.id ? { ...s, ...action.payload.partial } : s
+        ),
+      };
+
     case 'REMOVE_BROLL_SEGMENT':
       return {
         ...state,
@@ -189,6 +198,7 @@ interface TimelineContextValue {
   addAudioSegment: (segment: AudioSegment) => void;
   removeAudioSegment: (id: string) => void;
   addBRollSegment: (segment: BRollSegment) => void;
+  updateBRollSegment: (id: string, partial: Partial<BRollSegment>) => void;
   removeBRollSegment: (id: string) => void;
   setAspectRatio: (ratio: AspectRatio) => void;
   language: string;
@@ -421,6 +431,10 @@ export function TimelineProvider({ children }: { children: React.ReactNode }) {
     dispatch({ type: 'ADD_BROLL_SEGMENT', payload: segment });
   }, []);
 
+  const updateBRollSegment = useCallback((id: string, partial: Partial<BRollSegment>) => {
+    dispatch({ type: 'UPDATE_BROLL_SEGMENT', payload: { id, partial } });
+  }, []);
+
   const removeBRollSegment = useCallback((id: string) => {
     dispatch({ type: 'REMOVE_BROLL_SEGMENT', payload: id });
   }, []);
@@ -474,6 +488,7 @@ export function TimelineProvider({ children }: { children: React.ReactNode }) {
         addAudioSegment,
         removeAudioSegment,
         addBRollSegment,
+        updateBRollSegment,
         removeBRollSegment,
         setAspectRatio,
         language,
