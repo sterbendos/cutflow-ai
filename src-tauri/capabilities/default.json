@@ -30,14 +30,11 @@
     {
       "identifier": "fs:allow-remove",
       "allow": [{ "path": "$TEMP/**" }]
-    }
-    ,
+    },
     {
-      "identifier": "fs:allow-app-local-data",
-      "allow": [
-        { "path": "$LOCALAPPDATA/**" },
-        { "path": "$APPDATA/**" }
-      ]
+      "identifier": "fs:scope-applocaldata",
+      "allow": [{ "path": "$APPDATA/**" }]
     }
   ]
 }
+
