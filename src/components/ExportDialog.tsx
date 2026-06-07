@@ -84,17 +84,26 @@ export default function ExportDialog({ open, onClose }: ExportDialogProps) {
         }
 
         setStatusMessage('Rendering frames and invoking native ffmpeg...');
-        await exportTimelineToTauriMp4(state, {
-          quality,
-          resolution,
-          includeSubtitles,
-          transcript: subtitleWords,
-          captionStyle: exportCaptionStyle,
-          effects,
-          bRolls,
-          motionGraphics,
-          onProgress: (p, m) => { setExportProgress(p); setStatusMessage(m); },
-        }, outputPath, projectName);
+        await exportTimelineToTauriMp4(
+          state,
+          {
+            quality,
+            resolution,
+            includeSubtitles,
+            transcript: subtitleWords,
+            captionStyle: exportCaptionStyle,
+            effects,
+            bRolls,
+            motionGraphics,
+            onProgress: (p, m) => {
+              setExportProgress(p);
+              setStatusMessage(m);
+            },
+          },
+          outputPath,
+        );
+        setStatusMessage(`Export queued to: ${outputPath}`);
+        return;
         setStatusMessage(`Export queued to: ${outputPath}`);
         return;
       } catch (e) {
