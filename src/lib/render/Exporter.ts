@@ -10,164 +10,228 @@ import { Compositor, type RenderBRoll } from './Compositor';
 export type BrowserExportQuality = 'high' | 'medium' | 'low';
 export type BrowserExportResolution = 'source' | '2160' | '1080' | '720';
 
-export interface BrowserExportOptions {
-  quality: BrowserExportQuality;
-  resolution: BrowserExportResolution;
-  includeSubtitles: boolean;
-  transcript: TranscriptWord[];
-  captionStyle: CaptionStyle;
-  effects: EffectFilters;
-  bRolls: BRollSegment[];
-  motionGraphics: MotionGraphicsItem[];
-  fps?: number;
-  onProgress?: (progress: number, message: string) => void;
-}
+  const fps = options.fps ?? 30;
+  const tempPrefix = `cutflow_export_${crypto.randomUUID()}`;
 
-interface LoadedBRoll {
-  segment: BRollSegment;
-  video: HTMLVideoElement;
-}
+  // Dynamic imports and handles
+  let writeFile: any; let writeTextFile: any; let mkdir: any; let BaseDirectory: any;
+  let invoke: any; let appLocalDataDir: any; let join: any;
 
-interface VideoSize {
-  width: number;
-  height: number;
-}
+  // 1) Import Tauri modules
+  try {
+    ({ writeFile, writeTextFile, mkdir, BaseDirectory } = await import('@tauri-apps/plugin-fs'));
+    ({ invoke } = await import('@tauri-apps/api/core'));
+    ({ appLocalDataDir, join } = await import('@tauri-apps/api/path'));
+    console.debug('[TauriExport] Tauri modules imported');
+  } catch (e) {
+    console.error('[TauriExport] Failed to import Tauri modules', e);
+    throw new Error(`Tauri import failure: ${String(e)}`);
+  }
 
-type MuxerVideoCodec = 'avc' | 'vp9';
+  // 2) Create temp dir
+  try {
+    console.debug('[TauriExport] Step 1: Creating temp dir...', tempPrefix);
+    await mkdir(tempPrefix, { baseDir: BaseDirectory.AppLocalData, recursive: true });
+    console.debug('[TauriExport] Step 1: Temp dir created');
+  } catch (e) {
+    console.error('[TauriExport] Step 1 FAILED: mkdir', e);
+    throw new Error(`Failed to create temp directory: ${String(e)}`);
+  }
 
-interface SelectedVideoCodec {
-  encoderCodec: string;
-  muxerCodec: MuxerVideoCodec;
-}
+  // 3) Load source video
+  let sourceVideo: HTMLVideoElement;
+  try {
+    console.debug('[TauriExport] Step 2: Loading source video...', state.source_video_path);
+    sourceVideo = await loadVideoElement(state.source_video_path, false);
+    console.debug('[TauriExport] Step 2: Source video loaded', sourceVideo.videoWidth, 'x', sourceVideo.videoHeight);
+  } catch (e) {
+    console.error('[TauriExport] Step 2 FAILED: loadVideoElement', e);
+    throw new Error(`Failed to load source video: ${String(e)}`);
+  }
 
-const QUALITY_BITRATES: Record<BrowserExportQuality, number> = {
-  high: 12_000_000,
-  medium: 6_000_000,
-  low: 3_000_000,
-};
+  // 4) Setup compositor
+  let canvas: HTMLCanvasElement; let compositor: Compositor;
+  try {
+    console.debug('[TauriExport] Step 3: Setting up compositor...');
+    canvas = document.createElement('canvas');
+    compositor = new Compositor(canvas);
+    const sourceSize = getVideoElementSize(sourceVideo);
+    const outputSize = resolveOutputSize(sourceSize, state.aspectRatio, options.resolution);
+    compositor.setSize(outputSize.width, outputSize.height);
+    console.debug('[TauriExport] Step 3: Compositor ready', outputSize);
+  } catch (e) {
+    console.error('[TauriExport] Step 3 FAILED: compositor setup', e);
+    throw e;
+  }
 
-const AUDIO_FRAME_SIZE = 1024;
+  // 5) Load B-roll videos
+  let loadedBRolls: LoadedBRoll[] = [];
+  try {
+    console.debug('[TauriExport] Step 4: Loading B-roll videos...', options.bRolls?.length ?? 0);
+    loadedBRolls = await Promise.all(
+      options.bRolls
+        .filter((segment) => segment.path && !segment.path.startsWith('mock://') && !segment.path.startsWith('appdata/'))
+        .map(async (segment): Promise<LoadedBRoll> => ({
+          segment,
+          video: await loadVideoElement(segment.path, true),
+        })),
+    );
+    console.debug('[TauriExport] Step 4: B-rolls loaded', loadedBRolls.length);
+  } catch (e) {
+    console.error('[TauriExport] Step 4 FAILED: load b-roll', e);
+    throw new Error(`Failed to load B-roll: ${String(e)}`);
+  }
 
-export async function exportTimelineToMp4(
-  state: TimelineState,
-  options: BrowserExportOptions,
-): Promise<Blob> {
-  // Don't assert WebCodecs immediately — prefer fallback in Tauri or when WebCodecs aren't available.
-
+  // 6) Prepare keep segments and frames
   const keepSegments = state.edl
     .filter((segment) => segment.segment_type === 'keep' && segment.end > segment.start)
     .sort((a, b) => a.start - b.start);
+  const totalOutputDuration = keepSegments.reduce((t, s) => t + (s.end - s.start), 0);
+  const totalFrames = Math.max(1, Math.ceil(totalOutputDuration * fps));
+  console.debug('[TauriExport] Step 5: Keep segments', keepSegments.length, 'totalFrames:', totalFrames);
 
-  if (!state.source_video_path) {
-    throw new Error('No source video loaded');
-  }
+  // 7) Render frames
+  try {
+    console.debug('[TauriExport] Step 6: Starting frame render...');
+    let frameIndex = 0;
+    for (const segment of keepSegments) {
+      const segmentFrames = Math.max(1, Math.ceil((segment.end - segment.start) * fps));
 
-  if (keepSegments.length === 0) {
-    throw new Error("No segments marked as 'keep'");
-  }
+      for (let i = 0; i < segmentFrames; i += 1) {
+        const sourceTimestamp = Math.min(segment.start + i * (1 / fps), segment.end - 0.000_001);
 
-  const fps = options.fps ?? 30;
-  const sourceVideo = await loadVideoElement(state.source_video_path, false);
-  const sourceSize = getVideoElementSize(sourceVideo);
-  const outputSize = resolveOutputSize(sourceSize, state.aspectRatio, options.resolution);
-  const outputDuration = keepSegments.reduce((total, segment) => total + segment.end - segment.start, 0);
-  const totalFrames = Math.max(1, Math.ceil(outputDuration * fps));
-  const FRAMES_PER_BATCH = 30;
-  const frameDurationMicros = Math.round(1_000_000 / fps);
+        await seekVideo(sourceVideo, sourceTimestamp);
 
-  const supportsWebCodecs = typeof (window as any).VideoEncoder !== 'undefined' && typeof (window as any).VideoFrame !== 'undefined';
-  // NOTE: codec/muxer are created later only when WebCodecs are available
+        const activeBRolls = await getActiveBRolls(loadedBRolls, sourceTimestamp);
+        compositor.renderFrame({
+          timestamp: sourceTimestamp,
+          source: sourceVideo,
+          bRolls: activeBRolls,
+          transcript: options.transcript,
+          captionsVisible: options.includeSubtitles,
+          captionStyle: options.captionStyle,
+          motionGraphics: options.motionGraphics,
+          effects: options.effects,
+          subtitlePosition: (options.captionStyle as any)?.position ?? 'bottom',
+        });
 
-  const canvas = document.createElement('canvas');
-  const compositor = new Compositor(canvas);
-  compositor.setSize(outputSize.width, outputSize.height);
+        // Export PNG
+        const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob((b) => resolve(b), 'image/png'));
+        if (!blob) throw new Error('Canvas toBlob failed');
+        const arrayBuffer = await blob.arrayBuffer();
+        const uint8 = new Uint8Array(arrayBuffer);
 
-  const loadedBRolls = await Promise.all(
-    options.bRolls
-      .filter((segment) => segment.path && !segment.path.startsWith('mock://') && !segment.path.startsWith('appdata/'))
-      .map(async (segment): Promise<LoadedBRoll> => ({
-        segment,
-        video: await loadVideoElement(segment.path, true),
-      })),
-  );
+        const filename = `${tempPrefix}/frame_${String(frameIndex + 1).padStart(5, '0')}.png`;
+        // eslint-disable-next-line no-await-in-loop
+        await writeFile(filename, uint8, { baseDir: BaseDirectory.AppLocalData });
 
-  function runningInTauri() {
-    try {
-      const w = window as any;
-      return !!(w.__TAURI__ || w.__TAURI_IPC__ || w.__TAURI_METADATA__);
-    } catch {
-      return false;
-    }
-  }
-
-  // encoder variables and factory will be defined after muxer is created
-
-  // If we're running inside Tauri, or WebCodecs aren't available, prefer the MediaRecorder fallback first
-  if (runningInTauri()) {
-    throw new Error('Use exportTimelineToTauriMp4 for native exports when running inside Tauri.');
-  }
-
-  if (!supportsWebCodecs) {
-    try {
-      options.onProgress?.(0, 'WebCodecs unavailable — using MediaRecorder fallback');
-      const webm = await recordCanvasStreamFallback({
-        canvas,
-        compositor,
-        keepSegments,
-        loadedBRolls,
-        sourceVideo,
-        fps,
-        frameDurationMicros,
-        totalFrames,
-        options,
-      });
-      return webm;
-    } catch (tauriFallbackErr) {
-      console.warn('[Exporter] MediaRecorder fallback failed, cannot proceed with WebCodecs path:', tauriFallbackErr);
-      throw new Error('WebCodecs not available and MediaRecorder fallback failed');
-    }
-  }
-
-  // Now that we've tried (or skipped) the fallback, ensure WebCodecs are present before proceeding with encoder path
-  if (!supportsWebCodecs) {
-    throw new Error('WebCodecs are not available and the MediaRecorder fallback failed');
-  }
-
-  // Prepare codec, audio and muxer (WebCodecs path)
-  const codec = await selectVideoCodec(outputSize, QUALITY_BITRATES[options.quality], fps);
-  const preparedAudio = await prepareAudioTrack(state.source_video_path, keepSegments, options.onProgress);
-  const target = new ArrayBufferTarget();
-  const muxer = new Muxer({
-    target,
-    video: {
-      codec: codec.muxerCodec,
-      width: outputSize.width,
-      height: outputSize.height,
-      frameRate: fps,
-    },
-    audio: preparedAudio
-      ? {
-          codec: 'aac',
-          numberOfChannels: preparedAudio.numberOfChannels,
-          sampleRate: preparedAudio.sampleRate,
+        frameIndex += 1;
+        if (frameIndex % FRAMES_PER_BATCH === 0) {
+          // yield to the event loop so the UI remains responsive
+          // eslint-disable-next-line no-await-in-loop
+          await new Promise((r) => setTimeout(r, 0));
         }
-      : undefined,
-    fastStart: 'in-memory',
-    firstTimestampBehavior: 'offset',
-  });
-
-    let encoderError: Error | null = null;
-    let encoderClosed = false;
-    let videoEncoder: VideoEncoder | null = null;
-
-  const encoderOutput = (chunk: any, meta: any) => {
-    try {
-      muxer.addVideoChunk(chunk, meta);
-    } catch (err) {
-      encoderError = err instanceof Error ? err : new Error(String(err));
-      encoderClosed = true;
+        const progress = Math.min(0.8, (frameIndex / totalFrames) * 0.8);
+        options.onProgress?.(progress, `Rendering frames... ${Math.round(progress * 100)}%`);
+      }
     }
-  };
+
+    console.debug('[TauriExport] Step 6: Frames rendered', { frameIndex: totalFrames });
+  } catch (e) {
+    console.error('[TauriExport] Step 6 FAILED: render frames', e);
+    throw e;
+  }
+
+  // 8) Write ASS subtitles if present (non-fatal)
+  try {
+    console.debug('[TauriExport] Step 7: Writing subtitles...');
+    if (options.includeSubtitles && Array.isArray(options.transcript) && options.transcript.length > 0) {
+      const { generateSrtForExport } = await import('@/lib/export/subtitles');
+      const ass = generateSrtForExport(options.transcript as any, state.edl, options.captionStyle);
+      if (ass && ass.length > 0) {
+        await writeTextFile(`${tempPrefix}/subtitles.ass`, ass, { baseDir: BaseDirectory.AppLocalData });
+        console.debug('[TauriExport] Step 7: Subtitles written');
+      }
+    }
+  } catch (e) {
+    console.warn('[TauriExport] Step 7: Subtitle write failed (non-critical)', e);
+  }
+
+  // 9) Extract edited audio (best-effort)
+  let audioAbsPath: string | null = null;
+  try {
+    console.debug('[TauriExport] Step 8: Extracting audio...');
+    if (state.source_video_path) {
+      const AudioContextCtor = (window as any).AudioContext || (window as any).webkitAudioContext;
+      if (AudioContextCtor) {
+        const audioContext = new AudioContextCtor();
+        try {
+          const sourceUrl = convertFileSrc(state.source_video_path);
+          const resp = await fetch(sourceUrl);
+          if (resp.ok) {
+            const ab = await resp.arrayBuffer();
+            const decoded = await audioContext.decodeAudioData(ab.slice(0));
+
+            const channels = Math.min(2, decoded.numberOfChannels);
+            const sampleRate = decoded.sampleRate;
+            const totalFrames = keepSegments.reduce((sum, seg) => sum + Math.max(0, Math.round((seg.end - seg.start) * sampleRate)), 0);
+            if (totalFrames > 0) {
+              const edited = audioContext.createBuffer(channels, totalFrames, sampleRate);
+              let writeOffset = 0;
+              for (const seg of keepSegments) {
+                const startFrame = Math.max(0, Math.floor(seg.start * sampleRate));
+                const endFrame = Math.min(decoded.length, Math.floor(seg.end * sampleRate));
+                const framesToCopy = Math.max(0, endFrame - startFrame);
+                for (let ch = 0; ch < channels; ch += 1) {
+                  const sourceData = decoded.getChannelData(ch);
+                  const targetData = edited.getChannelData(ch);
+                  targetData.set(sourceData.subarray(startFrame, startFrame + framesToCopy), writeOffset);
+                }
+                writeOffset += framesToCopy;
+              }
+
+              const wavBytes = audioBufferToWav(edited);
+              await writeFile(`${tempPrefix}/audio.wav`, wavBytes, { baseDir: BaseDirectory.AppLocalData });
+              const appData = await appLocalDataDir();
+              audioAbsPath = await join(appData, tempPrefix, 'audio.wav');
+              console.debug('[TauriExport] Step 8: wrote edited audio', audioAbsPath);
+            }
+          }
+        } finally {
+          try { await audioContext.close(); } catch {}
+        }
+      }
+    }
+  } catch (e) {
+    console.warn('[TauriExport] Step 8: Audio extraction failed (non-critical)', e);
+    options.onProgress?.(0.5, 'Warning: Could not extract edited audio — exporting without audio');
+  }
+
+  // 10) Invoke FFmpeg sidecar
+  try {
+    console.debug('[TauriExport] Step 9: Invoking FFmpeg...');
+    options.onProgress?.(0.85, 'Encoding with native ffmpeg...');
+    const appData = await appLocalDataDir();
+    const tempDirAbs = await join(appData, tempPrefix);
+    const invokeArgs: any = { temp_dir: tempDirAbs, output_path: outputPath, fps };
+    if (audioAbsPath) {
+      invokeArgs.audio_path = audioAbsPath;
+      invokeArgs.source_video_path = state.source_video_path;
+    } else {
+      console.debug('[TauriExport] no edited audio available; not passing source video as audio fallback');
+    }
+
+    console.debug('[TauriExport] Step 9: invoke args', invokeArgs);
+    await invoke('export_frames_to_mp4', invokeArgs);
+    console.debug('[TauriExport] Step 9: FFmpeg complete');
+    options.onProgress?.(1, 'Export complete');
+  } catch (err) {
+    console.error('[TauriExport] Step 9 FAILED: ffmpeg invoke failed', err);
+    throw err;
+  }
+
+  disposeVideos([sourceVideo, ...loadedBRolls.map((i) => i.video)]);
+  return outputPath;
 
   const encoderErrorHandler = (err: any) => {
     encoderError = err instanceof Error ? err : new Error(String(err));
@@ -404,25 +468,50 @@ async function selectVideoCodec(size: VideoSize, bitrate: number, fps: number): 
 }
 
 async function loadVideoElement(path: string, muted: boolean): Promise<HTMLVideoElement> {
+  const normalizedPath = typeof path === 'string' ? path.replace(/\\/g, '/') : path;
   const video = document.createElement('video');
-  video.src = convertFileSrc(path);
+  try {
+    video.src = convertFileSrc(normalizedPath);
+  } catch (e) {
+    // convertFileSrc may throw in non-tauri contexts — fall back to raw normalized path
+    // eslint-disable-next-line no-console
+    console.debug('[loadVideoElement] convertFileSrc failed, using normalized path', normalizedPath, e);
+    video.src = normalizedPath;
+  }
   video.crossOrigin = 'anonymous';
   video.preload = 'auto';
   video.muted = muted;
   video.playsInline = true;
 
+  // eslint-disable-next-line no-console
+  console.debug('[loadVideoElement] Loading:', normalizedPath, '→', video.src);
+
   await new Promise<void>((resolve, reject) => {
+    const timeout = window.setTimeout(() => {
+      cleanup();
+      // eslint-disable-next-line no-console
+      console.error('[loadVideoElement] Timeout loading video:', normalizedPath);
+      reject(new Error(`Timeout loading video: ${normalizedPath}`));
+    }, 10000);
+
     const cleanup = () => {
+      window.clearTimeout(timeout);
       video.removeEventListener('loadedmetadata', onLoadedMetadata);
       video.removeEventListener('error', onError);
     };
+
     const onLoadedMetadata = () => {
       cleanup();
+      // eslint-disable-next-line no-console
+      console.debug('[loadVideoElement] Loaded:', normalizedPath, video.videoWidth, 'x', video.videoHeight);
       resolve();
     };
+
     const onError = () => {
       cleanup();
-      reject(new Error(`Failed to load video: ${path}`));
+      // eslint-disable-next-line no-console
+      console.error('[loadVideoElement] Error loading:', normalizedPath, video.error);
+      reject(new Error(`Failed to load video: ${normalizedPath}`));
     };
 
     video.addEventListener('loadedmetadata', onLoadedMetadata, { once: true });
@@ -867,91 +956,133 @@ export async function exportTimelineToTauriMp4(
   const fps = options.fps ?? 30;
   const tempPrefix = `cutflow_export_${crypto.randomUUID()}`;
 
+  // Import Tauri FS/invoke helpers (may throw in non-tauri environments)
   const { writeFile, writeTextFile, mkdir, BaseDirectory } = await import('@tauri-apps/plugin-fs');
   const { invoke } = await import('@tauri-apps/api/core');
   const { appLocalDataDir, join } = await import('@tauri-apps/api/path');
 
-  // ensure temp dir exists under AppLocalData
-  await mkdir(tempPrefix, { baseDir: BaseDirectory.AppLocalData, recursive: true });
-  console.debug('[TauriExport] temp dir created:', tempPrefix);
+  console.debug('[TauriExport] === START ===');
+  console.debug('[TauriExport] tempPrefix:', tempPrefix);
 
-  // Render frames into temp dir
+  // Step 1: Create temp dir
+  try {
+    console.debug('[TauriExport] Step 1: Creating temp dir...');
+    await mkdir(tempPrefix, { baseDir: BaseDirectory.AppLocalData, recursive: true });
+    console.debug('[TauriExport] Step 1: Temp dir created');
+  } catch (e) {
+    console.error('[TauriExport] Step 1 FAILED (mkdir):', e);
+    throw new Error(`Failed to create temp dir: ${String(e)}`);
+  }
+
+  // Step 2: Load source video
+  let sourceVideo: HTMLVideoElement;
+  try {
+    console.debug('[TauriExport] Step 2: Loading source video...', state.source_video_path);
+    sourceVideo = await loadVideoElement(state.source_video_path, false);
+    console.debug('[TauriExport] Step 2: Source video loaded', sourceVideo.videoWidth, 'x', sourceVideo.videoHeight);
+  } catch (e) {
+    console.error('[TauriExport] Step 2 FAILED (load source):', e);
+    throw new Error(`Failed to load source video: ${String(e)}`);
+  }
+
+  // Step 3: Setup compositor
   const canvas = document.createElement('canvas');
   const compositor = new Compositor(canvas);
-  const sourceVideo = await loadVideoElement(state.source_video_path, false);
   const sourceSize = getVideoElementSize(sourceVideo);
   const outputSize = resolveOutputSize(sourceSize, state.aspectRatio, options.resolution);
   compositor.setSize(outputSize.width, outputSize.height);
+  console.debug('[TauriExport] Step 3: Compositor ready', outputSize);
 
-  const loadedBRolls = await Promise.all(
-    options.bRolls
-      .filter((segment) => segment.path && !segment.path.startsWith('mock://') && !segment.path.startsWith('appdata/'))
-      .map(async (segment): Promise<LoadedBRoll> => ({
-        segment,
-        video: await loadVideoElement(segment.path, true),
-      })),
-  );
+  // Step 4: Load B-roll videos
+  let loadedBRolls: LoadedBRoll[] = [];
+  try {
+    console.debug('[TauriExport] Step 4: Loading B-roll videos...', options.bRolls?.length ?? 0);
+    loadedBRolls = await Promise.all(
+      options.bRolls
+        .filter((segment) => segment.path && !segment.path.startsWith('mock://') && !segment.path.startsWith('appdata/'))
+        .map(async (segment): Promise<LoadedBRoll> => ({
+          segment,
+          video: await loadVideoElement(segment.path, true),
+        })),
+    );
+    console.debug('[TauriExport] Step 4: B-rolls loaded', loadedBRolls.length);
+  } catch (e) {
+    console.error('[TauriExport] Step 4 FAILED (load b-roll):', e);
+    throw new Error(`Failed to load B-roll: ${String(e)}`);
+  }
 
+  // Step 5: Prepare keep segments
   const keepSegments = state.edl
     .filter((segment) => segment.segment_type === 'keep' && segment.end > segment.start)
     .sort((a, b) => a.start - b.start);
   const totalOutputDuration = keepSegments.reduce((t, s) => t + (s.end - s.start), 0);
   const totalFrames = Math.max(1, Math.ceil(totalOutputDuration * fps));
-  const FRAMES_PER_BATCH = 30;
+  console.debug('[TauriExport] Step 5: Keep segments', keepSegments.length, 'totalFrames:', totalFrames);
 
-  console.debug('[TauriExport] start', { outputPath, projectName, fps, totalFrames, keepSegments: keepSegments.length, bRollCount: options.bRolls?.length ?? 0 });
-
+  // Step 6: Render frames
+  console.debug('[TauriExport] Step 6: Starting frame render...');
   let frameIndex = 0;
-  for (const segment of keepSegments) {
-    const segmentFrames = Math.max(1, Math.ceil((segment.end - segment.start) * fps));
-    for (let i = 0; i < segmentFrames; i += 1) {
-      const sourceTimestamp = Math.min(segment.start + i * (1 / fps), segment.end - 0.000_001);
-      await seekVideo(sourceVideo, sourceTimestamp);
-      const activeBRolls = await getActiveBRolls(loadedBRolls, sourceTimestamp);
-      compositor.renderFrame({
-        timestamp: sourceTimestamp,
-        source: sourceVideo,
-        bRolls: activeBRolls,
-        transcript: options.transcript,
-        captionsVisible: options.includeSubtitles,
-        captionStyle: options.captionStyle,
-        motionGraphics: options.motionGraphics,
-        effects: options.effects,
-        subtitlePosition: (options.captionStyle as any)?.position ?? 'bottom',
-      });
+  try {
+    for (const segment of keepSegments) {
+      const segmentFrames = Math.max(1, Math.ceil((segment.end - segment.start) * fps));
+      for (let i = 0; i < segmentFrames; i += 1) {
+        const sourceTimestamp = Math.min(segment.start + i * (1 / fps), segment.end - 0.000_001);
+        await seekVideo(sourceVideo, sourceTimestamp);
+        const activeBRolls = await getActiveBRolls(loadedBRolls, sourceTimestamp);
+        compositor.renderFrame({
+          timestamp: sourceTimestamp,
+          source: sourceVideo,
+          bRolls: activeBRolls,
+          transcript: options.transcript,
+          captionsVisible: options.includeSubtitles,
+          captionStyle: options.captionStyle,
+          motionGraphics: options.motionGraphics,
+          effects: options.effects,
+          subtitlePosition: (options.captionStyle as any)?.position ?? 'bottom',
+        });
 
-      const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob((b) => resolve(b), 'image/png'));
-      if (!blob) throw new Error('Canvas toBlob failed');
-      const arrayBuffer = await blob.arrayBuffer();
-      const uint8 = new Uint8Array(arrayBuffer);
+        const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob((b) => resolve(b), 'image/png'));
+        if (!blob) throw new Error('Canvas toBlob failed');
+        const arrayBuffer = await blob.arrayBuffer();
+        const uint8 = new Uint8Array(arrayBuffer);
 
-      const filename = `${tempPrefix}/frame_${String(frameIndex + 1).padStart(5, '0')}.png`;
-      await writeFile(filename, uint8, { baseDir: BaseDirectory.AppLocalData });
+        const filename = `${tempPrefix}/frame_${String(frameIndex + 1).padStart(5, '0')}.png`;
+        await writeFile(filename, uint8, { baseDir: BaseDirectory.AppLocalData });
 
-      frameIndex += 1;
-      if (frameIndex % FRAMES_PER_BATCH === 0) {
-        await new Promise((r) => setTimeout(r, 0));
+        frameIndex += 1;
+        if (frameIndex % FRAMES_PER_BATCH === 0) {
+          await new Promise((r) => setTimeout(r, 0));
+        }
+        const progress = Math.min(0.8, (frameIndex / totalFrames) * 0.8);
+        options.onProgress?.(progress, `Rendering frames... ${Math.round(progress * 100)}%`);
       }
-      const progress = Math.min(0.8, (frameIndex / totalFrames) * 0.8);
-      options.onProgress?.(progress, `Rendering frames... ${Math.round(progress * 100)}%`);
     }
+  } catch (e) {
+    console.error('[TauriExport] Step 6 FAILED (render frames):', e);
+    throw e;
   }
 
-  console.debug('[TauriExport] frames rendered', { frameIndex, totalFrames });
+  console.debug('[TauriExport] Step 6: Frames rendered', frameIndex);
 
-  // Write ASS subtitles if present
-  if (options.includeSubtitles && Array.isArray(options.transcript) && options.transcript.length > 0) {
-    const { generateSrtForExport } = await import('@/lib/export/subtitles');
-    const ass = generateSrtForExport(options.transcript as any, state.edl, options.captionStyle);
-    if (ass && ass.length > 0) {
-      await writeTextFile(`${tempPrefix}/subtitles.ass`, ass, { baseDir: BaseDirectory.AppLocalData });
-      console.debug('[TauriExport] wrote ASS subtitles');
+  // Step 7: Write subtitles
+  try {
+    console.debug('[TauriExport] Step 7: Writing subtitles...');
+    if (options.includeSubtitles && Array.isArray(options.transcript) && options.transcript.length > 0) {
+      const { generateSrtForExport } = await import('@/lib/export/subtitles');
+      const ass = generateSrtForExport(options.transcript as any, state.edl, options.captionStyle);
+      if (ass && ass.length > 0) {
+        await writeTextFile(`${tempPrefix}/subtitles.ass`, ass, { baseDir: BaseDirectory.AppLocalData });
+        console.debug('[TauriExport] Step 7: Subtitles written');
+      }
     }
+  } catch (e) {
+    console.warn('[TauriExport] Step 7 FAILED (subtitles) — continuing without subtitles:', e);
   }
 
-  // Try to extract edited audio and write it to AppLocalData/tempPrefix/audio.wav
+  // Step 8: Extract audio
   let audioAbsPath: string | null = null;
   try {
+    console.debug('[TauriExport] Step 8: Extracting audio...');
     if (state.source_video_path) {
       const AudioContextCtor = (window as any).AudioContext || (window as any).webkitAudioContext;
       if (AudioContextCtor) {
@@ -985,7 +1116,7 @@ export async function exportTimelineToTauriMp4(
               await writeFile(`${tempPrefix}/audio.wav`, wavBytes, { baseDir: BaseDirectory.AppLocalData });
               const appData = await appLocalDataDir();
               audioAbsPath = await join(appData, tempPrefix, 'audio.wav');
-                  console.debug('[TauriExport] wrote edited audio', audioAbsPath);
+              console.debug('[TauriExport] Step 8: wrote edited audio', audioAbsPath);
             }
           }
         } finally {
@@ -994,32 +1125,27 @@ export async function exportTimelineToTauriMp4(
       }
     }
   } catch (e) {
-        console.warn('[Exporter] failed to extract edited audio:', e);
-        options.onProgress?.(0.5, 'Warning: Could not extract edited audio — exporting without audio');
+    console.warn('[TauriExport] Step 8 FAILED (audio extraction) — continuing without audio:', e);
   }
 
-      options.onProgress?.(0.85, 'Encoding with native ffmpeg...');
-      const appData = await appLocalDataDir();
-      const tempDirAbs = await join(appData, tempPrefix);
-      // If audio extraction failed we explicitly avoid falling back to the source video's audio
-      const invokeArgs: any = { temp_dir: tempDirAbs, output_path: outputPath, fps };
-      if (audioAbsPath) {
-        invokeArgs.audio_path = audioAbsPath;
-        // pass source_video_path only as a hint when we have an edited audio file available
-        invokeArgs.source_video_path = state.source_video_path;
-      } else {
-        console.debug('[TauriExport] no edited audio available; not passing source video as audio fallback');
-      }
-
-      try {
-        console.debug('[TauriExport] invoking export_frames_to_mp4', invokeArgs);
-        await invoke('export_frames_to_mp4', invokeArgs);
-        console.debug('[TauriExport] ffmpeg invoke finished');
-        options.onProgress?.(1, 'Export complete');
-      } catch (err) {
-        console.error('[TauriExport] ffmpeg invoke failed', err);
-        throw err;
-      }
+  // Step 9: Invoke FFmpeg
+  try {
+    console.debug('[TauriExport] Step 9: Invoking FFmpeg...');
+    const appData = await appLocalDataDir();
+    const tempDirAbs = await join(appData, tempPrefix);
+    const invokeArgs: any = { temp_dir: tempDirAbs, output_path: outputPath, fps };
+    if (audioAbsPath) {
+      invokeArgs.audio_path = audioAbsPath;
+      invokeArgs.source_video_path = state.source_video_path;
+    }
+    console.debug('[TauriExport] Step 9: invoke args', invokeArgs);
+    await invoke('export_frames_to_mp4', invokeArgs);
+    console.debug('[TauriExport] Step 9: FFmpeg complete');
+    options.onProgress?.(1, 'Export complete');
+  } catch (e) {
+    console.error('[TauriExport] Step 9 FAILED (ffmpeg invoke):', e);
+    throw e;
+  }
 
   disposeVideos([sourceVideo, ...loadedBRolls.map((i) => i.video)]);
   return outputPath;
