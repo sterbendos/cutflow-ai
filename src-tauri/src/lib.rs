@@ -653,6 +653,14 @@ async fn export_frames_to_mp4(
 
     let audio_source = audio_path.as_ref().or(source_video_path.as_ref());
     let audio_mapping = if let Some(src) = audio_source {
+        // If an explicit audio_path was supplied, ensure the file exists before invoking ffmpeg
+        if let Some(a) = audio_path.as_ref() {
+            let audio_path_obj = std::path::Path::new(a);
+            if !audio_path_obj.exists() {
+                return Err(format!("Provided audio file not found: {}", a));
+            }
+        }
+
         let normalized_input = normalize_windows_path(src);
         args.push("-i".to_string());
         args.push(normalized_input.clone());

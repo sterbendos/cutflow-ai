@@ -63,6 +63,9 @@ export default function ExportDialog({ open, onClose }: ExportDialogProps) {
   const exportMp4 = useCallback(async () => {
     // If running inside Tauri, prefer native ffmpeg sidecar export path
     const isTauri = typeof window !== 'undefined' && (window as any).__TAURI__;
+    // Debug: surface Tauri detection in case webview doesn't expose the global as expected
+    // eslint-disable-next-line no-console
+    console.debug('[ExportDialog] isTauri:', isTauri, 'window.__TAURI__:', (window as any).__TAURI__);
     if (isTauri) {
       try {
         setStatusMessage('Preparing native export...');

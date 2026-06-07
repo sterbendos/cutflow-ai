@@ -72,6 +72,7 @@ export async function exportTimelineToMp4(
   const outputSize = resolveOutputSize(sourceSize, state.aspectRatio, options.resolution);
   const outputDuration = keepSegments.reduce((total, segment) => total + segment.end - segment.start, 0);
   const totalFrames = Math.max(1, Math.ceil(outputDuration * fps));
+  const FRAMES_PER_BATCH = 30;
   const frameDurationMicros = Math.round(1_000_000 / fps);
 
   const supportsWebCodecs = typeof (window as any).VideoEncoder !== 'undefined' && typeof (window as any).VideoFrame !== 'undefined';
@@ -102,9 +103,13 @@ export async function exportTimelineToMp4(
   // encoder variables and factory will be defined after muxer is created
 
   // If we're running inside Tauri, or WebCodecs aren't available, prefer the MediaRecorder fallback first
-  if (runningInTauri() || !supportsWebCodecs) {
+  if (runningInTauri()) {
+    throw new Error('Use exportTimelineToTauriMp4 for native exports when running inside Tauri.');
+  }
+
+  if (!supportsWebCodecs) {
     try {
-      options.onProgress?.(0, 'Running Tauri fallback exporter (MediaRecorder)');
+      options.onProgress?.(0, 'WebCodecs unavailable — using MediaRecorder fallback');
       const webm = await recordCanvasStreamFallback({
         canvas,
         compositor,
@@ -118,8 +123,8 @@ export async function exportTimelineToMp4(
       });
       return webm;
     } catch (tauriFallbackErr) {
-      console.warn('[Exporter] Tauri MediaRecorder fallback failed, falling back to VideoEncoder path:', tauriFallbackErr);
-      // continue to try VideoEncoder creation below
+      console.warn('[Exporter] MediaRecorder fallback failed, cannot proceed with WebCodecs path:', tauriFallbackErr);
+      throw new Error('WebCodecs not available and MediaRecorder fallback failed');
     }
   }
 
@@ -151,12 +156,9 @@ export async function exportTimelineToMp4(
     firstTimestampBehavior: 'offset',
   });
 
-  let encoderError: Error | null = null;
-  let encoderClosed = false;
-  let videoEncoder: VideoEncoder | null = null;
-  let encoderError: Error | null = null;
-  let encoderClosed = false;
-  let videoEncoder: VideoEncoder | null = null;
+    let encoderError: Error | null = null;
+    let encoderClosed = false;
+    let videoEncoder: VideoEncoder | null = null;
 
   const encoderOutput = (chunk: any, meta: any) => {
     try {
@@ -278,6 +280,7 @@ export async function exportTimelineToMp4(
           captionStyle: options.captionStyle,
           motionGraphics: options.motionGraphics,
           effects: options.effects,
+          subtitlePosition: (options.captionStyle as any)?.position ?? 'bottom',
         });
 
         if (encoderClosed) {
@@ -605,10 +608,12 @@ async function prepareAudioTrack(
 }
 
 async function encodeAudioTrack(preparedAudio: PreparedAudio, muxer: Muxer<ArrayBufferTarget>) {
+  let audioEncoderError: Error | null = null;
+
   const encoder = new AudioEncoder({
     output: (chunk, meta) => muxer.addAudioChunk(chunk, meta),
     error: (error) => {
-      throw error;
+      audioEncoderError = error instanceof Error ? error : new Error(String(error));
     },
   });
 
@@ -629,7 +634,7 @@ async function encodeAudioTrack(preparedAudio: PreparedAudio, muxer: Muxer<Array
     }
 
     const audioData = new AudioData({
-      format: 'f32-planar',
+      format: preparedAudio.format as any,
       sampleRate: preparedAudio.sampleRate,
       numberOfFrames: frames,
       numberOfChannels: preparedAudio.numberOfChannels,
@@ -643,9 +648,12 @@ async function encodeAudioTrack(preparedAudio: PreparedAudio, muxer: Muxer<Array
     if (encoder.encodeQueueSize > 12) {
       await waitForEncoderDrain();
     }
+
+    if (audioEncoderError) break;
   }
 
   await encoder.flush();
+  if (audioEncoderError) throw audioEncoderError;
 }
 
 // MediaRecorder fallback: render frames to canvas and capture via captureStream
@@ -718,6 +726,7 @@ async function recordCanvasStreamFallback(opts: {
           captionStyle: options.captionStyle,
           motionGraphics: options.motionGraphics,
           effects: options.effects,
+          subtitlePosition: (options.captionStyle as any)?.position ?? 'bottom',
         });
 
         outputFrameIndex += 1;
@@ -803,6 +812,7 @@ export async function exportTimelineFramesToPngSequence(
           captionStyle: options.captionStyle,
           motionGraphics: options.motionGraphics,
           effects: options.effects,
+          subtitlePosition: (options.captionStyle as any)?.position ?? 'bottom',
         });
 
         // Export PNG
@@ -817,6 +827,11 @@ export async function exportTimelineFramesToPngSequence(
         await writeFile(filename, uint8, { baseDir: BaseDirectory.AppLocalData });
 
         frameIndex += 1;
+        if (frameIndex % FRAMES_PER_BATCH === 0) {
+          // yield to the event loop so the UI remains responsive
+          // eslint-disable-next-line no-await-in-loop
+          await new Promise((r) => setTimeout(r, 0));
+        }
         const progress = Math.min(0.95, (frameIndex / totalFrames) * 0.95);
         options.onProgress?.(progress, `Rendering frames... ${Math.round(progress * 100)}%`);
       }
@@ -854,6 +869,7 @@ export async function exportTimelineToTauriMp4(
 
   const { writeFile, writeTextFile, mkdir, BaseDirectory } = await import('@tauri-apps/plugin-fs');
   const { invoke } = await import('@tauri-apps/api/core');
+  const { appLocalDataDir, join } = await import('@tauri-apps/api/path');
 
   // ensure temp dir exists under AppLocalData
   await mkdir(tempPrefix, { baseDir: BaseDirectory.AppLocalData, recursive: true });
@@ -878,6 +894,9 @@ export async function exportTimelineToTauriMp4(
   const keepSegments = state.edl
     .filter((segment) => segment.segment_type === 'keep' && segment.end > segment.start)
     .sort((a, b) => a.start - b.start);
+  const totalOutputDuration = keepSegments.reduce((t, s) => t + (s.end - s.start), 0);
+  const totalFrames = Math.max(1, Math.ceil(totalOutputDuration * fps));
+  const FRAMES_PER_BATCH = 30;
 
   let frameIndex = 0;
   for (const segment of keepSegments) {
@@ -895,6 +914,7 @@ export async function exportTimelineToTauriMp4(
         captionStyle: options.captionStyle,
         motionGraphics: options.motionGraphics,
         effects: options.effects,
+        subtitlePosition: (options.captionStyle as any)?.position ?? 'bottom',
       });
 
       const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob((b) => resolve(b), 'image/png'));
@@ -906,7 +926,10 @@ export async function exportTimelineToTauriMp4(
       await writeFile(filename, uint8, { baseDir: BaseDirectory.AppLocalData });
 
       frameIndex += 1;
-      const progress = Math.min(0.8, (frameIndex / Math.max(1, Math.ceil(keepSegments.reduce((t, s) => t + (s.end - s.start), 0) * fps))) * 0.8);
+      if (frameIndex % FRAMES_PER_BATCH === 0) {
+        await new Promise((r) => setTimeout(r, 0));
+      }
+      const progress = Math.min(0.8, (frameIndex / totalFrames) * 0.8);
       options.onProgress?.(progress, `Rendering frames... ${Math.round(progress * 100)}%`);
     }
   }
@@ -965,6 +988,7 @@ export async function exportTimelineToTauriMp4(
     }
   } catch (e) {
     console.warn('[Exporter] failed to extract edited audio:', e);
+    options.onProgress?.(0.5, 'Warning: Could not extract edited audio, using original audio track');
   }
 
   options.onProgress?.(0.85, 'Encoding with native ffmpeg...');
