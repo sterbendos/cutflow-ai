@@ -34,7 +34,7 @@ function downloadBlob(blob: Blob, filename: string) {
 
 export default function ExportDialog({ open, onClose }: ExportDialogProps) {
   const { effects } = useEffects();
-  const { state, transcript, bRolls } = useTimeline();
+  const { state, transcript, bRolls, faceSubtitlePlacement } = useTimeline();
   const { style: captionStyle } = useCaption();
   const { items: motionGraphics } = useMotionGraphics();
   const [format, setFormat] = useState<ExportFormat>('mp4');
@@ -47,10 +47,11 @@ export default function ExportDialog({ open, onClose }: ExportDialogProps) {
   const [exportProgress, setExportProgress] = useState(0);
   const [errorDetail, setErrorDetail] = useState('');
 
-  const exportCaptionStyle = useMemo(
-    () => getPresetStyle(selectedPresetName, captionStyle),
-    [captionStyle, selectedPresetName],
-  );
+  const exportCaptionStyle = useMemo(() => {
+    const base = getPresetStyle(selectedPresetName, captionStyle);
+    if (faceSubtitlePlacement) return { ...base, position: faceSubtitlePlacement };
+    return base;
+  }, [captionStyle, selectedPresetName, faceSubtitlePlacement]);
 
   const subtitleWords = useMemo(() => {
     return Array.isArray(transcript) ? transcript : [];

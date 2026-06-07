@@ -177,6 +177,7 @@ function timelineReducer(
 // ─────────────────────────────────────────────────────────────
 
 import { useWhisper, TranscriptWord } from '../hooks/useWhisper';
+import type { SubtitlePlacement } from '@/hooks/useFaceDetection';
 import type { TranscriptStatus } from '../hooks/useWhisper';
 
 interface TimelineContextValue {
@@ -218,6 +219,9 @@ interface TimelineContextValue {
   canUndo: boolean;
   canRedo: boolean;
   saveHistory: () => void;
+  // Face-aware subtitle placement (transient UI-only state)
+  faceSubtitlePlacement: SubtitlePlacement | null;
+  setFaceSubtitlePlacement: (p: SubtitlePlacement | null) => void;
 }
 
 const TimelineContext = createContext<TimelineContextValue | null>(null);
@@ -235,6 +239,8 @@ export function TimelineProvider({ children }: { children: React.ReactNode }) {
   // History Stack
   const [past, setPast] = useState<TimelineState[]>([]);
   const [future, setFuture] = useState<TimelineState[]>([]);
+  // Face-aware subtitle placement (transient UI-only state)
+  const [faceSubtitlePlacement, setFaceSubtitlePlacement] = useState<SubtitlePlacement | null>(null);
 
   const stateRef = useRef(state);
   
@@ -653,6 +659,8 @@ export function TimelineProvider({ children }: { children: React.ReactNode }) {
         canUndo: past.length > 0,
         canRedo: future.length > 0,
         saveHistory,
+        faceSubtitlePlacement,
+        setFaceSubtitlePlacement,
       }}
     >
       {children}

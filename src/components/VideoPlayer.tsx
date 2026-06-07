@@ -96,7 +96,7 @@ export default function VideoPlayer() {
   const { effects } = useEffects();
   const { style: captionStyle } = useCaption();
   const { items: motionGraphics } = useMotionGraphics();
-  const { state, transcript, bRolls, setCurrentTime, toggleSilenceSkip } = useTimeline();
+  const { state, transcript, bRolls, setCurrentTime, toggleSilenceSkip, setFaceSubtitlePlacement } = useTimeline();
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const compositorRef = useRef<Compositor | null>(null);
@@ -112,6 +112,13 @@ export default function VideoPlayer() {
     enabled: subtitlesVisible && Boolean(state.source_video_path),
     intervalMs: 250,
   });
+
+  // Publish transient placement to global timeline context so exports can use it
+  useEffect(() => {
+    try {
+      setFaceSubtitlePlacement(faceSubtitlePlacement ?? null);
+    } catch {}
+  }, [faceSubtitlePlacement, setFaceSubtitlePlacement]);
 
   const {
     currentTime,

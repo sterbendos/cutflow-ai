@@ -873,6 +873,7 @@ export async function exportTimelineToTauriMp4(
 
   // ensure temp dir exists under AppLocalData
   await mkdir(tempPrefix, { baseDir: BaseDirectory.AppLocalData, recursive: true });
+  console.debug('[TauriExport] temp dir created:', tempPrefix);
 
   // Render frames into temp dir
   const canvas = document.createElement('canvas');
@@ -897,6 +898,8 @@ export async function exportTimelineToTauriMp4(
   const totalOutputDuration = keepSegments.reduce((t, s) => t + (s.end - s.start), 0);
   const totalFrames = Math.max(1, Math.ceil(totalOutputDuration * fps));
   const FRAMES_PER_BATCH = 30;
+
+  console.debug('[TauriExport] start', { outputPath, projectName, fps, totalFrames, keepSegments: keepSegments.length, bRollCount: options.bRolls?.length ?? 0 });
 
   let frameIndex = 0;
   for (const segment of keepSegments) {
@@ -934,12 +937,15 @@ export async function exportTimelineToTauriMp4(
     }
   }
 
+  console.debug('[TauriExport] frames rendered', { frameIndex, totalFrames });
+
   // Write ASS subtitles if present
   if (options.includeSubtitles && Array.isArray(options.transcript) && options.transcript.length > 0) {
     const { generateSrtForExport } = await import('@/lib/export/subtitles');
     const ass = generateSrtForExport(options.transcript as any, state.edl, options.captionStyle);
     if (ass && ass.length > 0) {
       await writeTextFile(`${tempPrefix}/subtitles.ass`, ass, { baseDir: BaseDirectory.AppLocalData });
+      console.debug('[TauriExport] wrote ASS subtitles');
     }
   }
 
@@ -979,6 +985,7 @@ export async function exportTimelineToTauriMp4(
               await writeFile(`${tempPrefix}/audio.wav`, wavBytes, { baseDir: BaseDirectory.AppLocalData });
               const appData = await appLocalDataDir();
               audioAbsPath = await join(appData, tempPrefix, 'audio.wav');
+                  console.debug('[TauriExport] wrote edited audio', audioAbsPath);
             }
           }
         } finally {
@@ -987,15 +994,32 @@ export async function exportTimelineToTauriMp4(
       }
     }
   } catch (e) {
-    console.warn('[Exporter] failed to extract edited audio:', e);
-    options.onProgress?.(0.5, 'Warning: Could not extract edited audio, using original audio track');
+        console.warn('[Exporter] failed to extract edited audio:', e);
+        options.onProgress?.(0.5, 'Warning: Could not extract edited audio — exporting without audio');
   }
 
-  options.onProgress?.(0.85, 'Encoding with native ffmpeg...');
-  const appData = await appLocalDataDir();
-  const tempDirAbs = await join(appData, tempPrefix);
-  await invoke('export_frames_to_mp4', { temp_dir: tempDirAbs, output_path: outputPath, fps, source_video_path: state.source_video_path, audio_path: audioAbsPath });
-  options.onProgress?.(1, 'Export complete');
+      options.onProgress?.(0.85, 'Encoding with native ffmpeg...');
+      const appData = await appLocalDataDir();
+      const tempDirAbs = await join(appData, tempPrefix);
+      // If audio extraction failed we explicitly avoid falling back to the source video's audio
+      const invokeArgs: any = { temp_dir: tempDirAbs, output_path: outputPath, fps };
+      if (audioAbsPath) {
+        invokeArgs.audio_path = audioAbsPath;
+        // pass source_video_path only as a hint when we have an edited audio file available
+        invokeArgs.source_video_path = state.source_video_path;
+      } else {
+        console.debug('[TauriExport] no edited audio available; not passing source video as audio fallback');
+      }
+
+      try {
+        console.debug('[TauriExport] invoking export_frames_to_mp4', invokeArgs);
+        await invoke('export_frames_to_mp4', invokeArgs);
+        console.debug('[TauriExport] ffmpeg invoke finished');
+        options.onProgress?.(1, 'Export complete');
+      } catch (err) {
+        console.error('[TauriExport] ffmpeg invoke failed', err);
+        throw err;
+      }
 
   disposeVideos([sourceVideo, ...loadedBRolls.map((i) => i.video)]);
   return outputPath;
