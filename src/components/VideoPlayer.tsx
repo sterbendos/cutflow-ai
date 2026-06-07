@@ -6,12 +6,12 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTimeline } from '@/context/TimelineContext';
 import { usePlaybackPipeline } from '@/hooks/usePlaybackPipeline';
 import { convertFileSrc } from '@tauri-apps/api/core';
-import SubtitleOverlay from './SubtitleOverlay';
-import MotionGraphicsOverlay from './MotionGraphicsOverlay';
 import AspectRatioSelector from './AspectRatioSelector';
 import { useFaceDetection } from '@/hooks/useFaceDetection';
-import { effectsToCssFilter } from './TransformInspector';
 import { useEffects } from '@/context/EffectsContext';
+import { useCaption } from '@/context/CaptionContext';
+import { useMotionGraphics } from '@/context/MotionGraphicsContext';
+import { Compositor } from '@/lib/render/Compositor';
 
 // ─── Icon helpers ─────────────────────────────────────────────
 
@@ -94,11 +94,16 @@ function formatTime(secs: number): string {
 
 export default function VideoPlayer() {
   const { effects } = useEffects();
-  const cssFilter = effectsToCssFilter(effects);
-  const { state, bRolls, setCurrentTime, toggleSilenceSkip } = useTimeline();
+  const { style: captionStyle } = useCaption();
+  const { items: motionGraphics } = useMotionGraphics();
+  const { state, transcript, bRolls, setCurrentTime, toggleSilenceSkip } = useTimeline();
   const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const compositorRef = useRef<Compositor | null>(null);
   const videoUrlRef = useRef<string | null>(null);
   const [subtitlesVisible, setSubtitlesVisible] = useState(true);
+  const renderOnceLoggedRef = useRef(false);
+  const notReadyLoggedRef = useRef(false);
 
   // Face-aware subtitle placement — detects speaker face position
   // and dynamically moves subtitles above or below it.
@@ -135,9 +140,19 @@ export default function VideoPlayer() {
       const src = convertFileSrc(activeBRoll.path);
       // Only reload src when the b-roll segment changes
       if (prevBRollIdRef.current !== activeBRoll.id) {
+        console.debug('[VideoPlayer] setting b-roll src ->', src, 'id=', activeBRoll.id);
         vid.src = src;
         vid.load();
         prevBRollIdRef.current = activeBRoll.id;
+
+        const onLoaded = () => {
+          console.debug('[VideoPlayer] b-roll loadedmetadata', { id: activeBRoll.id, videoWidth: vid.videoWidth, videoHeight: vid.videoHeight });
+        };
+        const onError = (e: any) => {
+          console.error('[VideoPlayer] b-roll video error', e, 'src=', vid.src);
+        };
+        vid.addEventListener('loadedmetadata', onLoaded, { once: true });
+        vid.addEventListener('error', onError, { once: true });
       }
       const expectedTime = currentTime - activeBRoll.start;
       if (Math.abs(vid.currentTime - expectedTime) > 0.3) {
@@ -158,20 +173,114 @@ export default function VideoPlayer() {
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !state.source_video_path) return;
-
     // Revoke previous object URL if any
     if (videoUrlRef.current) {
-      URL.revokeObjectURL(videoUrlRef.current);
+      try { URL.revokeObjectURL(videoUrlRef.current); } catch {}
+      videoUrlRef.current = null;
     }
 
     // Use Tauri's asset protocol to load a local file
-    // Tauri v2 asset protocol resolution
-    video.src = convertFileSrc(state.source_video_path);
+    const src = convertFileSrc(state.source_video_path);
+    console.debug('[VideoPlayer] setting video.src ->', src, 'rawPath=', state.source_video_path);
+    // Only store/revoke object URLs that are blob: URLs
+    if (typeof src === 'string' && src.startsWith('blob:')) videoUrlRef.current = src;
+    video.src = src;
     video.load();
     video.currentTime = 0;
+
+    const onLoaded = () => {
+      console.debug('[VideoPlayer] loadedmetadata', { src: video.src, readyState: video.readyState, videoWidth: video.videoWidth, videoHeight: video.videoHeight });
+      // reset logging flags so first render message appears
+      renderOnceLoggedRef.current = false;
+      notReadyLoggedRef.current = false;
+    };
+
+    const onError = (ev: any) => {
+      console.error('[VideoPlayer] video element error', ev, 'src=', video.src);
+    };
+
+    video.addEventListener('loadedmetadata', onLoaded);
+    video.addEventListener('error', onError);
+
+    return () => {
+      video.removeEventListener('loadedmetadata', onLoaded);
+      video.removeEventListener('error', onError);
+    };
   }, [state.source_video_path]);
 
   // ── Keyboard shortcuts ────────────────────────────────────
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    compositorRef.current = new Compositor(canvas);
+    return () => {
+      compositorRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    let rafId: number | null = null;
+
+    const render = () => {
+      const video = videoRef.current;
+      const bRollVideo = bRollVideoRef.current;
+      const compositor = compositorRef.current;
+
+      if (
+        video &&
+        compositor &&
+        state.source_video_path &&
+        video.readyState >= HTMLMediaElement.HAVE_METADATA
+      ) {
+        compositor.setSize(video.videoWidth || 1920, video.videoHeight || 1080);
+        if (!renderOnceLoggedRef.current) {
+          const canvas = canvasRef.current;
+          console.debug('[VideoPlayer] rendering frames', { videoWidth: video.videoWidth, videoHeight: video.videoHeight, canvasW: canvas?.width, canvasH: canvas?.height });
+          renderOnceLoggedRef.current = true;
+        }
+        compositor.renderFrame({
+          timestamp: video.currentTime,
+          source: video,
+          bRolls:
+            activeBRoll &&
+            bRollVideo &&
+            bRollVideo.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA
+              ? [{ segment: activeBRoll, source: bRollVideo }]
+              : [],
+          transcript,
+          captionsVisible: subtitlesVisible,
+          captionStyle,
+          subtitlePosition: faceSubtitlePlacement ?? undefined,
+          motionGraphics,
+          effects,
+        });
+      }
+      else {
+        if (!notReadyLoggedRef.current) {
+          console.debug('[VideoPlayer] not ready to render', { readyState: video?.readyState, src: video?.src });
+          notReadyLoggedRef.current = true;
+        }
+      }
+
+      rafId = requestAnimationFrame(render);
+    };
+
+    rafId = requestAnimationFrame(render);
+    return () => {
+      if (rafId !== null) cancelAnimationFrame(rafId);
+    };
+  }, [
+    activeBRoll,
+    captionStyle,
+    effects,
+    faceSubtitlePlacement,
+    motionGraphics,
+    state.source_video_path,
+    subtitlesVisible,
+    transcript,
+  ]);
+
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
       // Only capture when focus is not in an input
@@ -261,7 +370,6 @@ export default function VideoPlayer() {
         </div>
       )}
 
-      {/* Video element with aspect ratio wrapper */}
       <div
         style={{
           display: state.source_video_path ? 'flex' : 'none',
@@ -270,54 +378,54 @@ export default function VideoPlayer() {
           flex: 1,
           width: '100%',
           maxHeight: 'calc(100% - 80px)',
+          position: 'relative',
         }}
       >
+        <canvas
+          ref={canvasRef}
+          id="main-canvas"
+          aria-label="Video preview"
+          style={{
+            maxWidth: '100%',
+            maxHeight: '100%',
+            objectFit: 'contain',
+            aspectRatio: state.aspectRatio.replace(':', '/'),
+            background: '#000',
+            cursor: 'pointer',
+          }}
+          onClick={togglePlay}
+        />
         <video
           ref={videoRef}
           id="main-video"
           playsInline
-          preload="metadata"
-          aria-label="Video preview"
+          preload="auto"
+          aria-hidden="true"
           crossOrigin="anonymous"
           style={{
-            maxWidth: '100%',
-            maxHeight: '100%',
-            objectFit: 'contain',
-            aspectRatio: state.aspectRatio,
-            filter: cssFilter || undefined,
-            transition: 'filter 0.2s ease',
+            position: 'absolute',
+            width: 1,
+            height: 1,
+            opacity: 0,
+            pointerEvents: 'none',
           }}
-          onClick={togglePlay}
         />
-        {/* B-Roll overlay — always mounted, fades in/out via opacity */}
         <video
           ref={bRollVideoRef}
           muted
+          playsInline
+          preload="auto"
+          aria-hidden="true"
+          crossOrigin="anonymous"
           style={{
             position: 'absolute',
-            maxWidth: '100%',
-            maxHeight: '100%',
-            objectFit: 'contain',
-            aspectRatio: state.aspectRatio,
-            zIndex: 5,
-            background: '#000',
-            opacity: activeBRoll ? (activeBRoll.spatial?.opacity ?? 1) : 0,
-            transform: activeBRoll?.spatial 
-              ? `translate(${activeBRoll.spatial.x * 100}%, ${activeBRoll.spatial.y * 100}%) scale(${activeBRoll.spatial.scale}) rotate(${activeBRoll.spatial.rotation}deg)`
-              : 'translate(0%, 0%) scale(1) rotate(0deg)',
-            filter: cssFilter || undefined,
-            transition: 'opacity 0.25s ease, transform 0.1s ease, filter 0.2s ease',
-            pointerEvents: activeBRoll ? 'auto' : 'none',
+            width: 1,
+            height: 1,
+            opacity: 0,
+            pointerEvents: 'none',
           }}
-          onClick={togglePlay}
         />
       </div>
-
-      {/* Subtitles Overlay — dynamicPosition set by face detection */}
-      <SubtitleOverlay visible={subtitlesVisible} dynamicPosition={faceSubtitlePlacement} />
-      {/* Motion Graphics Overlay */}
-      <MotionGraphicsOverlay />
-
       {/* Aspect Ratio + Status toolbar */}
       {state.source_video_path && (
         <div
