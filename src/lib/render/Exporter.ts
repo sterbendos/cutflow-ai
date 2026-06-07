@@ -154,57 +154,30 @@ export async function exportTimelineToMp4(
   let encoderError: Error | null = null;
   let encoderClosed = false;
   let videoEncoder: VideoEncoder | null = null;
+  let encoderError: Error | null = null;
+  let encoderClosed = false;
+  let videoEncoder: VideoEncoder | null = null;
 
-  const createEncoder = () => new VideoEncoder({
-    output: (chunk, meta) => {
-      try {
-        muxer.addVideoChunk(chunk, meta);
-      } catch (err) {
-        encoderError = err instanceof Error ? err : new Error(String(err));
-        encoderClosed = true;
-      }
-    },
-    error: (err) => {
+  const encoderOutput = (chunk: any, meta: any) => {
+    try {
+      muxer.addVideoChunk(chunk, meta);
+    } catch (err) {
       encoderError = err instanceof Error ? err : new Error(String(err));
       encoderClosed = true;
-    },
-  });
-
-  try {
-    // Try preferred hardware acceleration first, then fall back to software.
-    videoEncoder = createEncoder();
-    try {
-      videoEncoder.configure({
-        codec: codec.encoderCodec,
-        width: outputSize.width,
-        height: outputSize.height,
-        bitrate: QUALITY_BITRATES[options.quality],
-        framerate: fps,
-        latencyMode: 'quality',
-        hardwareAcceleration: 'prefer-hardware',
-      });
-    } catch (hwErr) {
-      console.warn('[Exporter] hardware VideoEncoder.configure failed, trying prefer-software', hwErr);
-      try {
-        videoEncoder.configure({
-          codec: codec.encoderCodec,
-          width: outputSize.width,
-          height: outputSize.height,
-          bitrate: QUALITY_BITRATES[options.quality],
-          framerate: fps,
-          latencyMode: 'quality',
-          hardwareAcceleration: 'prefer-software',
-        });
-      } catch (swErr) {
-        // Close encoder and rethrow combined error
-        try { videoEncoder.close(); } catch {}
-        encoderClosed = true;
-        throw new Error(`Encoder configure failed (hardware error: ${String(hwErr)}; software error: ${String(swErr)})`);
-      }
     }
-  } catch (createErr) {
-    console.warn('[Exporter] VideoEncoder creation/configure failed:', createErr);
-    // Try MediaRecorder fallback to produce a WebM when WebCodecs are unavailable
+  };
+
+  const encoderErrorHandler = (err: any) => {
+    encoderError = err instanceof Error ? err : new Error(String(err));
+    encoderClosed = true;
+  };
+
+  // Try to construct the encoder; if constructor fails, fall back immediately
+  try {
+    // @ts-ignore - some environments have slightly different ctor shapes
+    videoEncoder = new (VideoEncoder as any)({ output: encoderOutput, error: encoderErrorHandler });
+  } catch (ctorErr) {
+    console.warn('[Exporter] VideoEncoder constructor failed:', ctorErr);
     try {
       options.onProgress?.(0, 'Encoder unavailable — falling back to MediaRecorder');
       const webm = await recordCanvasStreamFallback({
@@ -222,6 +195,60 @@ export async function exportTimelineToMp4(
     } catch (fallbackErr) {
       console.error('[Exporter] MediaRecorder fallback failed:', fallbackErr);
       throw new Error(`Encoder creation error. Also failed recording fallback: ${String(fallbackErr)}`);
+    }
+  }
+
+  // Attempt multiple configure strategies. Some webviews reject the hardwareAcceleration hint.
+  const configureAttempts: any[] = [
+    { hardwareAcceleration: 'prefer-hardware' },
+    { hardwareAcceleration: 'prefer-software' },
+    {}, // final attempt without hardwareAcceleration
+  ];
+
+  let configured = false;
+  let lastConfigError: any = null;
+  for (const cfgExtra of configureAttempts) {
+    try {
+      const cfg: any = {
+        codec: codec.encoderCodec,
+        width: outputSize.width,
+        height: outputSize.height,
+        bitrate: QUALITY_BITRATES[options.quality],
+        framerate: fps,
+        latencyMode: 'quality',
+        ...cfgExtra,
+      };
+      // @ts-ignore
+      videoEncoder.configure(cfg);
+      configured = true;
+      break;
+    } catch (configErr) {
+      lastConfigError = configErr;
+      console.warn('[Exporter] VideoEncoder.configure attempt failed:', cfgExtra, configErr);
+    }
+  }
+
+  if (!configured) {
+    try { videoEncoder.close(); } catch {}
+    encoderClosed = true;
+    console.error('[Exporter] All VideoEncoder.configure attempts failed:', lastConfigError);
+    try {
+      options.onProgress?.(0, 'Encoder unavailable — falling back to MediaRecorder');
+      const webm = await recordCanvasStreamFallback({
+        canvas,
+        compositor,
+        keepSegments,
+        loadedBRolls,
+        sourceVideo,
+        fps,
+        frameDurationMicros,
+        totalFrames,
+        options,
+      });
+      return webm;
+    } catch (fallbackErr) {
+      console.error('[Exporter] MediaRecorder fallback failed:', fallbackErr);
+      throw new Error(`Encoder configure failed: ${String(lastConfigError)}. MediaRecorder fallback also failed: ${String(fallbackErr)}`);
     }
   }
 
@@ -333,13 +360,33 @@ function assertWebCodecsAvailable() {
 }
 
 async function selectVideoCodec(size: VideoSize, bitrate: number, fps: number): Promise<SelectedVideoCodec> {
+  function getH264CodecForHeight(height: number) {
+    if (height <= 720) return 'avc1.42001f';
+    if (height <= 1080) return 'avc1.4d0034';
+    return 'avc1.64003e';
+  }
+
+  const h264Variants = [
+    getH264CodecForHeight(size.height),
+    'avc1.42E01E',
+    'avc1.42001E',
+    'avc1.4D401E',
+    'avc1.640028',
+  ];
+
+  // de-duplicate while preserving order
+  const uniqueH264: string[] = [];
+  for (const v of h264Variants) {
+    if (!uniqueH264.includes(v)) uniqueH264.push(v);
+  }
+
   const candidates: SelectedVideoCodec[] = [
-    { encoderCodec: 'avc1.42001f', muxerCodec: 'avc' },
+    ...uniqueH264.map((c) => ({ encoderCodec: c, muxerCodec: 'avc' })),
     { encoderCodec: 'vp09.00.10.08', muxerCodec: 'vp9' },
   ];
 
   for (const candidate of candidates) {
-    const support = await VideoEncoder.isConfigSupported({
+    const support = await (VideoEncoder as any).isConfigSupported({
       codec: candidate.encoderCodec,
       width: size.width,
       height: size.height,
@@ -347,7 +394,7 @@ async function selectVideoCodec(size: VideoSize, bitrate: number, fps: number): 
       framerate: fps,
     }).catch(() => ({ supported: false }));
 
-    if (support.supported) return candidate;
+    if (support && support.supported) return candidate;
   }
 
   throw new Error('No supported WebCodecs video encoder was found for MP4 export.');
@@ -473,6 +520,8 @@ interface PreparedAudio {
   buffer: AudioBuffer;
   numberOfChannels: number;
   sampleRate: number;
+  codec: string;
+  format: string;
 }
 
 async function prepareAudioTrack(
@@ -531,17 +580,28 @@ async function prepareAudioTrack(
     writeOffset += framesToCopy;
   }
 
-  const support = await AudioEncoder.isConfigSupported({
-    codec: 'mp4a.40.2',
-    sampleRate,
-    numberOfChannels,
-    bitrate: 192_000,
-  }).catch(() => ({ supported: false }));
+  // Try multiple audio codecs and choose the first supported one
+  const audioCandidates = [
+    { codec: 'mp4a.40.2', format: 'f32-planar' },
+    { codec: 'opus', format: 'f32-planar' },
+  ];
 
-  if (!support.supported) return null;
+  for (const candidate of audioCandidates) {
+    // @ts-ignore - some browsers may not support isConfigSupported
+    const support = await (AudioEncoder as any).isConfigSupported({
+      codec: candidate.codec,
+      sampleRate,
+      numberOfChannels,
+      bitrate: 192_000,
+    }).catch(() => ({ supported: false }));
 
-  onProgress?.(0.03, 'Prepared source audio...');
-  return { buffer: output, numberOfChannels, sampleRate };
+    if (support && support.supported) {
+      onProgress?.(0.03, 'Prepared source audio...');
+      return { buffer: output, numberOfChannels, sampleRate, codec: candidate.codec, format: candidate.format };
+    }
+  }
+
+  return null;
 }
 
 async function encodeAudioTrack(preparedAudio: PreparedAudio, muxer: Muxer<ArrayBufferTarget>) {
@@ -553,7 +613,7 @@ async function encodeAudioTrack(preparedAudio: PreparedAudio, muxer: Muxer<Array
   });
 
   encoder.configure({
-    codec: 'mp4a.40.2',
+    codec: preparedAudio.codec,
     sampleRate: preparedAudio.sampleRate,
     numberOfChannels: preparedAudio.numberOfChannels,
     bitrate: 192_000,
@@ -603,7 +663,14 @@ async function recordCanvasStreamFallback(opts: {
   const { canvas, compositor, keepSegments, loadedBRolls, sourceVideo, fps, frameDurationMicros, totalFrames, options } = opts;
 
   // Choose mimeType
-  const candidates = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'];
+  const candidates = [
+    'video/webm;codecs=vp9',
+    'video/webm;codecs=vp8',
+    'video/webm',
+    // try mp4 containers if MediaRecorder supports it in some webviews
+    'video/mp4;codecs=avc1.42E01E',
+    'video/mp4',
+  ];
   let mime: string | null = null;
   for (const c of candidates) {
     if (MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(c)) {
@@ -788,8 +855,8 @@ export async function exportTimelineToTauriMp4(
   const { writeFile, writeTextFile, mkdir, BaseDirectory } = await import('@tauri-apps/plugin-fs');
   const { invoke } = await import('@tauri-apps/api/core');
 
-  // ensure temp dir exists
-  await mkdir(tempPrefix, { baseDir: BaseDirectory.Temp, recursive: true });
+  // ensure temp dir exists under AppLocalData
+  await mkdir(tempPrefix, { baseDir: BaseDirectory.AppLocalData, recursive: true });
 
   // Render frames into temp dir
   const canvas = document.createElement('canvas');
@@ -836,7 +903,7 @@ export async function exportTimelineToTauriMp4(
       const uint8 = new Uint8Array(arrayBuffer);
 
       const filename = `${tempPrefix}/frame_${String(frameIndex + 1).padStart(5, '0')}.png`;
-      await writeFile(filename, uint8, { baseDir: BaseDirectory.Temp });
+      await writeFile(filename, uint8, { baseDir: BaseDirectory.AppLocalData });
 
       frameIndex += 1;
       const progress = Math.min(0.8, (frameIndex / Math.max(1, Math.ceil(keepSegments.reduce((t, s) => t + (s.end - s.start), 0) * fps))) * 0.8);
@@ -849,12 +916,61 @@ export async function exportTimelineToTauriMp4(
     const { generateSrtForExport } = await import('@/lib/export/subtitles');
     const ass = generateSrtForExport(options.transcript as any, state.edl, options.captionStyle);
     if (ass && ass.length > 0) {
-      await writeTextFile(`${tempPrefix}/subtitles.ass`, ass, { baseDir: BaseDirectory.Temp });
+      await writeTextFile(`${tempPrefix}/subtitles.ass`, ass, { baseDir: BaseDirectory.AppLocalData });
     }
   }
 
+  // Try to extract edited audio and write it to AppLocalData/tempPrefix/audio.wav
+  let audioAbsPath: string | null = null;
+  try {
+    if (state.source_video_path) {
+      const AudioContextCtor = (window as any).AudioContext || (window as any).webkitAudioContext;
+      if (AudioContextCtor) {
+        const audioContext = new AudioContextCtor();
+        try {
+          const sourceUrl = convertFileSrc(state.source_video_path);
+          const resp = await fetch(sourceUrl);
+          if (resp.ok) {
+            const ab = await resp.arrayBuffer();
+            const decoded = await audioContext.decodeAudioData(ab.slice(0));
+
+            const channels = Math.min(2, decoded.numberOfChannels);
+            const sampleRate = decoded.sampleRate;
+            const totalFrames = keepSegments.reduce((sum, seg) => sum + Math.max(0, Math.round((seg.end - seg.start) * sampleRate)), 0);
+            if (totalFrames > 0) {
+              const edited = audioContext.createBuffer(channels, totalFrames, sampleRate);
+              let writeOffset = 0;
+              for (const seg of keepSegments) {
+                const startFrame = Math.max(0, Math.floor(seg.start * sampleRate));
+                const endFrame = Math.min(decoded.length, Math.floor(seg.end * sampleRate));
+                const framesToCopy = Math.max(0, endFrame - startFrame);
+                for (let ch = 0; ch < channels; ch += 1) {
+                  const sourceData = decoded.getChannelData(ch);
+                  const targetData = edited.getChannelData(ch);
+                  targetData.set(sourceData.subarray(startFrame, startFrame + framesToCopy), writeOffset);
+                }
+                writeOffset += framesToCopy;
+              }
+
+              const wavBytes = audioBufferToWav(edited);
+              await writeFile(`${tempPrefix}/audio.wav`, wavBytes, { baseDir: BaseDirectory.AppLocalData });
+              const appData = await appLocalDataDir();
+              audioAbsPath = await join(appData, tempPrefix, 'audio.wav');
+            }
+          }
+        } finally {
+          try { await audioContext.close(); } catch {}
+        }
+      }
+    }
+  } catch (e) {
+    console.warn('[Exporter] failed to extract edited audio:', e);
+  }
+
   options.onProgress?.(0.85, 'Encoding with native ffmpeg...');
-  await invoke('export_frames_to_mp4', { temp_prefix: tempPrefix, output_path: outputPath, fps, source_video_path: state.source_video_path });
+  const appData = await appLocalDataDir();
+  const tempDirAbs = await join(appData, tempPrefix);
+  await invoke('export_frames_to_mp4', { temp_dir: tempDirAbs, output_path: outputPath, fps, source_video_path: state.source_video_path, audio_path: audioAbsPath });
   options.onProgress?.(1, 'Export complete');
 
   disposeVideos([sourceVideo, ...loadedBRolls.map((i) => i.video)]);
@@ -867,4 +983,46 @@ function disposeVideos(videos: HTMLVideoElement[]) {
     video.removeAttribute('src');
     video.load();
   });
+}
+
+function audioBufferToWav(buffer: AudioBuffer): Uint8Array {
+  const numChannels = buffer.numberOfChannels;
+  const sampleRate = buffer.sampleRate;
+  const numFrames = buffer.length;
+  const bytesPerSample = 2;
+  const blockAlign = numChannels * bytesPerSample;
+  const dataSize = numFrames * blockAlign;
+  const bufferSize = 44 + dataSize;
+  const view = new DataView(new ArrayBuffer(bufferSize));
+  let offset = 0;
+
+  function writeString(s: string) {
+    for (let i = 0; i < s.length; i++) view.setUint8(offset++, s.charCodeAt(i));
+  }
+
+  writeString('RIFF');
+  view.setUint32(offset, 36 + dataSize, true); offset += 4;
+  writeString('WAVE');
+  writeString('fmt ');
+  view.setUint32(offset, 16, true); offset += 4; // subchunk1 size
+  view.setUint16(offset, 1, true); offset += 2; // PCM
+  view.setUint16(offset, numChannels, true); offset += 2;
+  view.setUint32(offset, sampleRate, true); offset += 4;
+  view.setUint32(offset, sampleRate * blockAlign, true); offset += 4;
+  view.setUint16(offset, blockAlign, true); offset += 2;
+  view.setUint16(offset, 16, true); offset += 2; // bits per sample
+  writeString('data');
+  view.setUint32(offset, dataSize, true); offset += 4;
+
+  // Interleave and write samples
+  for (let i = 0; i < numFrames; i++) {
+    for (let ch = 0; ch < numChannels; ch++) {
+      const sample = Math.max(-1, Math.min(1, buffer.getChannelData(ch)[i] || 0));
+      const intSample = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
+      view.setInt16(offset, Math.round(intSample), true);
+      offset += 2;
+    }
+  }
+
+  return new Uint8Array(view.buffer);
 }

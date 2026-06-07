@@ -7,6 +7,7 @@ pub mod server;
 
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 use tauri::{AppHandle, Emitter};
@@ -618,12 +619,13 @@ async fn extract_audio_for_transcription(app: AppHandle, video_path: String) -> 
 #[tauri::command]
 async fn export_frames_to_mp4(
     app: AppHandle,
-    temp_prefix: String,
+    temp_dir: String,
     output_path: String,
     fps: u32,
     source_video_path: Option<String>,
+    audio_path: Option<String>,
 ) -> Result<String, String> {
-    let tmp_dir = std::env::temp_dir().join(&temp_prefix);
+    let tmp_dir = std::path::Path::new(&temp_dir).to_path_buf();
     if !tmp_dir.exists() {
         return Err(format!("Temp frames dir not found: {}", tmp_dir.to_string_lossy()));
     }
@@ -649,8 +651,9 @@ async fn export_frames_to_mp4(
         normalized_frames.clone(),
     ];
 
-    let audio_mapping = if let Some(src) = source_video_path {
-        let normalized_input = normalize_windows_path(&src);
+    let audio_source = audio_path.as_ref().or(source_video_path.as_ref());
+    let audio_mapping = if let Some(src) = audio_source {
+        let normalized_input = normalize_windows_path(src);
         args.push("-i".to_string());
         args.push(normalized_input.clone());
         // map video from first input, audio from second input
@@ -693,6 +696,9 @@ async fn export_frames_to_mp4(
 
     args.push(normalized_output.clone());
 
+    // Emit start event
+    app.emit("export-progress", &json!({"progress": 0.85, "message": "Starting FFmpeg encoding..."})).ok();
+
     let out = app
         .shell()
         .sidecar("ffmpeg")
@@ -706,6 +712,9 @@ async fn export_frames_to_mp4(
         let stderr = String::from_utf8_lossy(&out.stderr);
         return Err(format!("FFmpeg failed to encode frames: {stderr}"));
     }
+
+    // Emit completion event
+    app.emit("export-progress", &json!({"progress": 0.99, "message": "FFmpeg finished encoding"})).ok();
 
     // Best-effort cleanup of temp frames
     let _ = std::fs::remove_dir_all(&tmp_dir);
@@ -745,6 +754,22 @@ async fn convert_audio_to_wav(app: AppHandle, input_path: String, output_path: S
 }
 
 // -------------------------------------------------------------
+// Tauri Command: check_ffmpeg
+// Verifies that the ffmpeg sidecar is available and runnable.
+// -------------------------------------------------------------
+
+#[tauri::command]
+async fn check_ffmpeg(app: AppHandle) -> Result<bool, String> {
+    match app.shell().sidecar("ffmpeg") {
+        Ok(cmd) => {
+            let out = cmd.args(["-version"]).output().await.map_err(|e| format!("FFmpeg test failed: {e}"))?;
+            Ok(out.status.success())
+        }
+        Err(_) => Ok(false),
+    }
+}
+
+// -------------------------------------------------------------
 // Tauri Command: delete_file
 // Deletes a file from disk (used to clean up temp files)
 // -------------------------------------------------------------
@@ -776,17 +801,17 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_shell::init())
         .invoke_handler(tauri::generate_handler![
-            get_timeline_state,
-            set_source_video,
-            update_segment,
-            split_segment,
-            toggle_silence_skip,
-            analyze_video,
-            extract_audio_for_transcription,
-            convert_audio_to_wav,
-            export_video,
-                    export_frames_to_mp4,
-            delete_file,
+                get_timeline_state,
+                set_source_video,
+                update_segment,
+                split_segment,
+                toggle_silence_skip,
+                analyze_video,
+                extract_audio_for_transcription,
+                convert_audio_to_wav,
+                export_frames_to_mp4,
+                check_ffmpeg,
+                delete_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running CutFlow AI");

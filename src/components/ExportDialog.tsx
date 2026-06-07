@@ -70,6 +70,15 @@ export default function ExportDialog({ open, onClose }: ExportDialogProps) {
         const outputPath = await save({ defaultPath: `${projectName}.mp4`, filters: [{ name: 'MP4 (H.264)', extensions: ['mp4'] }] });
         if (!outputPath) return;
 
+        // Verify ffmpeg sidecar is available
+        const { invoke } = await import('@tauri-apps/api/core');
+        const ffmpegAvailable = await invoke('check_ffmpeg').catch(() => false as boolean);
+        if (!ffmpegAvailable) {
+          setErrorDetail('FFmpeg not found in this Tauri build. Please bundle FFmpeg or use browser export.');
+          setStatusMessage('FFmpeg not available');
+          return;
+        }
+
         setStatusMessage('Rendering frames and invoking native ffmpeg...');
         await exportTimelineToTauriMp4(state, {
           quality,
