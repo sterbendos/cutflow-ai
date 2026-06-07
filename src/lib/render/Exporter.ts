@@ -676,6 +676,191 @@ async function recordCanvasStreamFallback(opts: {
   return stopPromise;
 }
 
+export async function exportTimelineFramesToPngSequence(
+  state: TimelineState,
+  options: BrowserExportOptions & { fps?: number; onProgress?: (p: number, m: string) => void },
+  relativeDir: string,
+): Promise<{ dir: string; frameCount: number; assPath?: string | null }> {
+  // Only used in Tauri path. This writes PNG frames to AppLocalData/<relativeDir>
+  const keepSegments = state.edl
+    .filter((segment) => segment.segment_type === 'keep' && segment.end > segment.start)
+    .sort((a, b) => a.start - b.start);
+
+  if (!state.source_video_path) throw new Error('No source video loaded');
+  if (keepSegments.length === 0) throw new Error("No segments marked as 'keep'");
+
+  const fps = options.fps ?? 30;
+  const sourceVideo = await loadVideoElement(state.source_video_path, false);
+  const sourceSize = getVideoElementSize(sourceVideo);
+  const outputSize = resolveOutputSize(sourceSize, state.aspectRatio, options.resolution);
+  const outputDuration = keepSegments.reduce((total, segment) => total + segment.end - segment.start, 0);
+  const totalFrames = Math.max(1, Math.ceil(outputDuration * fps));
+
+  const canvas = document.createElement('canvas');
+  const compositor = new Compositor(canvas);
+  compositor.setSize(outputSize.width, outputSize.height);
+
+  const loadedBRolls = await Promise.all(
+    options.bRolls
+      .filter((segment) => segment.path && !segment.path.startsWith('mock://') && !segment.path.startsWith('appdata/'))
+      .map(async (segment): Promise<LoadedBRoll> => ({
+        segment,
+        video: await loadVideoElement(segment.path, true),
+      })),
+  );
+
+  // Create temp directory under AppLocalData
+  const { writeFile, writeTextFile, mkdir, BaseDirectory } = await import('@tauri-apps/plugin-fs');
+  const { appLocalDataDir, join } = await import('@tauri-apps/api/path');
+
+  await mkdir(relativeDir, { baseDir: BaseDirectory.AppLocalData, recursive: true });
+
+  let frameIndex = 0;
+
+  try {
+    for (const segment of keepSegments) {
+      const segmentFrames = Math.max(1, Math.ceil((segment.end - segment.start) * fps));
+
+      for (let i = 0; i < segmentFrames; i += 1) {
+        const sourceTimestamp = Math.min(segment.start + i * (1 / fps), segment.end - 0.000_001);
+
+        await seekVideo(sourceVideo, sourceTimestamp);
+
+        const activeBRolls = await getActiveBRolls(loadedBRolls, sourceTimestamp);
+        compositor.renderFrame({
+          timestamp: sourceTimestamp,
+          source: sourceVideo,
+          bRolls: activeBRolls,
+          transcript: options.transcript,
+          captionsVisible: options.includeSubtitles,
+          captionStyle: options.captionStyle,
+          motionGraphics: options.motionGraphics,
+          effects: options.effects,
+        });
+
+        // Export PNG
+        // eslint-disable-next-line no-await-in-loop
+        const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob((b) => resolve(b), 'image/png'));
+        if (!blob) throw new Error('Canvas toBlob failed');
+        const arrayBuffer = await blob.arrayBuffer();
+        const uint8 = new Uint8Array(arrayBuffer);
+
+        const filename = `${relativeDir}/frame_${String(frameIndex + 1).padStart(5, '0')}.png`;
+        // eslint-disable-next-line no-await-in-loop
+        await writeFile(filename, uint8, { baseDir: BaseDirectory.AppLocalData });
+
+        frameIndex += 1;
+        const progress = Math.min(0.95, (frameIndex / totalFrames) * 0.95);
+        options.onProgress?.(progress, `Rendering frames... ${Math.round(progress * 100)}%`);
+      }
+    }
+
+    // Write ASS subtitles if present
+    let assPath: string | null = null;
+    if (options.includeSubtitles && Array.isArray(options.transcript) && options.transcript.length > 0) {
+      const { generateSrtForExport } = await import('@/lib/export/subtitles');
+      const ass = generateSrtForExport(options.transcript as any, state.edl, options.captionStyle);
+      if (ass && ass.length > 0) {
+        const assFilename = `${relativeDir}/subs.ass`;
+        await writeTextFile(assFilename, ass, { baseDir: BaseDirectory.AppLocalData });
+        const appData = await appLocalDataDir();
+        assPath = await join(appData, relativeDir, 'subs.ass');
+      }
+    }
+
+    const appData = await appLocalDataDir();
+    const absoluteDir = await join(appData, relativeDir);
+    return { dir: absoluteDir, frameCount: frameIndex, assPath };
+  } finally {
+    disposeVideos([sourceVideo, ...loadedBRolls.map((item) => item.video)]);
+  }
+}
+
+export async function exportTimelineToTauriMp4(
+  state: TimelineState,
+  options: BrowserExportOptions & { fps?: number; onProgress?: (p: number, m: string) => void },
+  outputPath: string,
+  projectName?: string,
+): Promise<string> {
+  const fps = options.fps ?? 30;
+  const tempPrefix = `cutflow_export_${crypto.randomUUID()}`;
+
+  const { writeFile, writeTextFile, mkdir, BaseDirectory } = await import('@tauri-apps/plugin-fs');
+  const { invoke } = await import('@tauri-apps/api/core');
+
+  // ensure temp dir exists
+  await mkdir(tempPrefix, { baseDir: BaseDirectory.Temp, recursive: true });
+
+  // Render frames into temp dir
+  const canvas = document.createElement('canvas');
+  const compositor = new Compositor(canvas);
+  const sourceVideo = await loadVideoElement(state.source_video_path, false);
+  const sourceSize = getVideoElementSize(sourceVideo);
+  const outputSize = resolveOutputSize(sourceSize, state.aspectRatio, options.resolution);
+  compositor.setSize(outputSize.width, outputSize.height);
+
+  const loadedBRolls = await Promise.all(
+    options.bRolls
+      .filter((segment) => segment.path && !segment.path.startsWith('mock://') && !segment.path.startsWith('appdata/'))
+      .map(async (segment): Promise<LoadedBRoll> => ({
+        segment,
+        video: await loadVideoElement(segment.path, true),
+      })),
+  );
+
+  const keepSegments = state.edl
+    .filter((segment) => segment.segment_type === 'keep' && segment.end > segment.start)
+    .sort((a, b) => a.start - b.start);
+
+  let frameIndex = 0;
+  for (const segment of keepSegments) {
+    const segmentFrames = Math.max(1, Math.ceil((segment.end - segment.start) * fps));
+    for (let i = 0; i < segmentFrames; i += 1) {
+      const sourceTimestamp = Math.min(segment.start + i * (1 / fps), segment.end - 0.000_001);
+      await seekVideo(sourceVideo, sourceTimestamp);
+      const activeBRolls = await getActiveBRolls(loadedBRolls, sourceTimestamp);
+      compositor.renderFrame({
+        timestamp: sourceTimestamp,
+        source: sourceVideo,
+        bRolls: activeBRolls,
+        transcript: options.transcript,
+        captionsVisible: options.includeSubtitles,
+        captionStyle: options.captionStyle,
+        motionGraphics: options.motionGraphics,
+        effects: options.effects,
+      });
+
+      const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob((b) => resolve(b), 'image/png'));
+      if (!blob) throw new Error('Canvas toBlob failed');
+      const arrayBuffer = await blob.arrayBuffer();
+      const uint8 = new Uint8Array(arrayBuffer);
+
+      const filename = `${tempPrefix}/frame_${String(frameIndex + 1).padStart(5, '0')}.png`;
+      await writeFile(filename, uint8, { baseDir: BaseDirectory.Temp });
+
+      frameIndex += 1;
+      const progress = Math.min(0.8, (frameIndex / Math.max(1, Math.ceil(keepSegments.reduce((t, s) => t + (s.end - s.start), 0) * fps))) * 0.8);
+      options.onProgress?.(progress, `Rendering frames... ${Math.round(progress * 100)}%`);
+    }
+  }
+
+  // Write ASS subtitles if present
+  if (options.includeSubtitles && Array.isArray(options.transcript) && options.transcript.length > 0) {
+    const { generateSrtForExport } = await import('@/lib/export/subtitles');
+    const ass = generateSrtForExport(options.transcript as any, state.edl, options.captionStyle);
+    if (ass && ass.length > 0) {
+      await writeTextFile(`${tempPrefix}/subtitles.ass`, ass, { baseDir: BaseDirectory.Temp });
+    }
+  }
+
+  options.onProgress?.(0.85, 'Encoding with native ffmpeg...');
+  await invoke('export_frames_to_mp4', { temp_prefix: tempPrefix, output_path: outputPath, fps, source_video_path: state.source_video_path });
+  options.onProgress?.(1, 'Export complete');
+
+  disposeVideos([sourceVideo, ...loadedBRolls.map((i) => i.video)]);
+  return outputPath;
+}
+
 function disposeVideos(videos: HTMLVideoElement[]) {
   videos.forEach((video) => {
     video.pause();

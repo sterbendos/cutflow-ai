@@ -9,7 +9,7 @@ import { useCaption, captionPresets } from '@/context/CaptionContext';
 import { useMotionGraphics } from '@/context/MotionGraphicsContext';
 import { generateFcpxml, type ExportClip } from '@/lib/export/fcpxml';
 import { generateEdl } from '@/lib/export/edl';
-import { exportTimelineToMp4, type BrowserExportQuality, type BrowserExportResolution } from '@/lib/render/Exporter';
+import { exportTimelineToMp4, exportTimelineToTauriMp4, type BrowserExportQuality, type BrowserExportResolution } from '@/lib/render/Exporter';
 import type { CaptionStyle } from '@/context/CaptionContext';
 
 interface ExportDialogProps {
@@ -70,9 +70,18 @@ export default function ExportDialog({ open, onClose }: ExportDialogProps) {
         const outputPath = await save({ defaultPath: `${projectName}.mp4`, filters: [{ name: 'MP4 (H.264)', extensions: ['mp4'] }] });
         if (!outputPath) return;
 
-        const { invoke } = await import('@tauri-apps/api/core');
-        setStatusMessage('Export queued to native ffmpeg...');
-        await invoke('export_video', { output_path: outputPath });
+        setStatusMessage('Rendering frames and invoking native ffmpeg...');
+        await exportTimelineToTauriMp4(state, {
+          quality,
+          resolution,
+          includeSubtitles,
+          transcript: subtitleWords,
+          captionStyle: exportCaptionStyle,
+          effects,
+          bRolls,
+          motionGraphics,
+          onProgress: (p, m) => { setExportProgress(p); setStatusMessage(m); },
+        }, outputPath, projectName);
         setStatusMessage(`Export queued to: ${outputPath}`);
         return;
       } catch (e) {

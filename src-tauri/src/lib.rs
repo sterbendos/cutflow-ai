@@ -609,6 +609,112 @@ async fn extract_audio_for_transcription(app: AppHandle, video_path: String) -> 
 }
 
 // -------------------------------------------------------------
+// Tauri Command: export_frames_to_mp4
+// Encodes a sequence of PNG frames produced by the frontend compositor
+// into a final MP4 using the FFmpeg sidecar. Optionally maps audio from
+// the source video and applies ASS subtitles if present in the temp dir.
+// -------------------------------------------------------------
+
+#[tauri::command]
+async fn export_frames_to_mp4(
+    app: AppHandle,
+    temp_prefix: String,
+    output_path: String,
+    fps: u32,
+    source_video_path: Option<String>,
+) -> Result<String, String> {
+    let tmp_dir = std::env::temp_dir().join(&temp_prefix);
+    if !tmp_dir.exists() {
+        return Err(format!("Temp frames dir not found: {}", tmp_dir.to_string_lossy()));
+    }
+
+    let frames_pattern = tmp_dir.join("frame_%05d.png").to_string_lossy().to_string();
+    let normalized_frames = normalize_windows_path(&frames_pattern);
+    let normalized_output = normalize_windows_path(&output_path);
+
+    // Check for subtitles
+    let ass_path = tmp_dir.join("subtitles.ass");
+    let has_ass = ass_path.exists();
+    let ass_escaped = if has_ass {
+        Some(escape_ffmpeg_subtitle_filename(&ass_path.to_string_lossy()))
+    } else {
+        None
+    };
+
+    let mut args: Vec<String> = vec![
+        "-y".to_string(),
+        "-framerate".to_string(),
+        fps.to_string(),
+        "-i".to_string(),
+        normalized_frames.clone(),
+    ];
+
+    let audio_mapping = if let Some(src) = source_video_path {
+        let normalized_input = normalize_windows_path(&src);
+        args.push("-i".to_string());
+        args.push(normalized_input.clone());
+        // map video from first input, audio from second input
+        args.push("-map".to_string());
+        args.push("0:v:0".to_string());
+        args.push("-map".to_string());
+        args.push("1:a:0".to_string());
+        true
+    } else {
+        false
+    };
+
+    if let Some(ass) = ass_escaped {
+        // Use ass subtitle filter
+        args.push("-vf".to_string());
+        args.push(format!("ass='{}'", ass));
+    }
+
+    // Video codec + encoding settings
+    args.extend(vec![
+        "-c:v".to_string(),
+        "libx264".to_string(),
+        "-preset".to_string(),
+        "fast".to_string(),
+        "-crf".to_string(),
+        "18".to_string(),
+        "-pix_fmt".to_string(),
+        "yuv420p".to_string(),
+    ]);
+
+    if audio_mapping {
+        args.extend(vec![
+            "-c:a".to_string(),
+            "aac".to_string(),
+            "-b:a".to_string(),
+            "192k".to_string(),
+            "-shortest".to_string(),
+        ]);
+    }
+
+    args.push(normalized_output.clone());
+
+    let out = app
+        .shell()
+        .sidecar("ffmpeg")
+        .map_err(|e| format!("Failed to create sidecar command: {e}"))?
+        .args(args)
+        .output()
+        .await
+        .map_err(|e| format!("Failed to run ffmpeg: {e}"))?;
+
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        return Err(format!("FFmpeg failed to encode frames: {stderr}"));
+    }
+
+    // Best-effort cleanup of temp frames
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+
+    Ok(format!("Exported to: {}", normalized_output))
+}
+
+
+// -------------------------------------------------------------
 // Tauri Command: convert_audio_to_wav
 // Converts a recorded webm/ogg audio file to WAV via FFmpeg
 // -------------------------------------------------------------
@@ -679,6 +785,7 @@ pub fn run() {
             extract_audio_for_transcription,
             convert_audio_to_wav,
             export_video,
+                    export_frames_to_mp4,
             delete_file,
         ])
         .run(tauri::generate_context!())
